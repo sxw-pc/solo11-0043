@@ -1,0 +1,6 @@
+{
+  "dataset": "summary",
+  "source": "http://demo.local/summary",
+  "counts": {"catalog": 3, "orders": 3, "enriched": 3},
+  "note": "synthetic data for the offline batch scheduler demo"
+}

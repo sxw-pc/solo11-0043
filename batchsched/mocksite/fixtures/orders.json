@@ -1,0 +1,9 @@
+{
+  "dataset": "orders",
+  "source": "http://demo.local/orders",
+  "orders": [
+    {"id": "ord-1001", "catalog_id": "cat-001", "quantity": 2, "status": "paid"},
+    {"id": "ord-1002", "catalog_id": "cat-002", "quantity": 1, "status": "queued"},
+    {"id": "ord-1003", "catalog_id": "cat-001", "quantity": 5, "status": "paid"}
+  ]
+}

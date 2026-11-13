@@ -1,0 +1,6 @@
+# Direct dependency versions used for the delivered test run.
+# Install offline with: pip install --no-index --find-links <wheels> -e .[test]
+Flask==3.0.3
+requests==2.34.2
+PyYAML==6.0.2
+pytest==8.3.5

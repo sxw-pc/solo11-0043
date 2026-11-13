@@ -1,0 +1,9 @@
+{
+  "dataset": "catalog",
+  "source": "http://demo.local/catalog",
+  "items": [
+    {"id": "cat-001", "name": "alpha", "active": true},
+    {"id": "cat-002", "name": "bravo", "active": true},
+    {"id": "cat-003", "name": "charlie", "active": false}
+  ]
+}

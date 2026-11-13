@@ -1,0 +1,59 @@
+# Offline demonstration DAG.  Every source is served by the bundled
+# 127.0.0.1 mock site; no external network is used.
+name: demo-collection
+concurrency: 3
+jobs:
+  - id: fetch_catalog
+    source: /api/catalog
+    depends_on: []
+    retry:
+      mode: exponential
+      max_attempts: 3
+      base_delay_ms: 50
+    params:
+      note: product catalog fixture
+
+  - id: fetch_orders
+    source: /api/orders
+    depends_on: [fetch_catalog]
+    retry:
+      mode: fixed
+      max_attempts: 2
+      base_delay_ms: 100
+
+  - id: enrich_orders
+    source: /api/orders/enriched
+    depends_on: [fetch_orders]
+    retry:
+      mode: fixed
+      max_attempts: 2
+      base_delay_ms: 100
+    params:
+      min_bytes: 10
+
+  - id: fetch_flaky
+    source: /api/flaky
+    depends_on: []
+    retry:
+      mode: fixed
+      max_attempts: 3
+      base_delay_ms: 50
+
+  - id: fetch_slow
+    source: /api/slow
+    depends_on: [fetch_catalog]
+    retry:
+      mode: exponential
+      max_attempts: 2
+      base_delay_ms: 50
+
+  - id: summarize
+    source: /api/summary
+    depends_on: [enrich_orders, fetch_flaky, fetch_slow]
+    retry:
+      mode: fixed
+      max_attempts: 1
+      base_delay_ms: 50
+    params:
+      expect_content_type: application/json
+      min_bytes: 10

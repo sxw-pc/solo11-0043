@@ -1,0 +1,19 @@
+# Intentionally invalid plan used by validation tests.
+name: invalid-cycle-demo
+concurrency: 2
+jobs:
+  - id: fetch_alpha
+    source: /api/catalog
+    depends_on: [fetch_gamma]
+    retry:
+      mode: fixed
+      max_attempts: 1
+      base_delay_ms: 50
+
+  - id: fetch_beta
+    source: /api/orders
+    depends_on: [fetch_alpha]
+
+  - id: fetch_gamma
+    source: /api/summary
+    depends_on: [fetch_beta]

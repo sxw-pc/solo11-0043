@@ -1,0 +1,9 @@
+{
+  "dataset": "orders_enriched",
+  "source": "http://demo.local/orders/enriched",
+  "rows": [
+    {"order_id": "ord-1001", "product": "alpha", "quantity": 2},
+    {"order_id": "ord-1002", "product": "bravo", "quantity": 1},
+    {"order_id": "ord-1003", "product": "alpha", "quantity": 5}
+  ]
+}
