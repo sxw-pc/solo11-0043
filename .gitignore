@@ -6,3 +6,10 @@ work/
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
+venv/
+node_modules/
+*.pyc
+.coverage
+.benchmarks/
+.env
+dist/
