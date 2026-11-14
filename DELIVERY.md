@@ -24,64 +24,67 @@
 | `batchsched/cli.py` | 237 |
 | `batchsched/config.py` | 122 |
 | `batchsched/dag.py` | 114 |
-| `batchsched/executor.py` | 196 |
-| `batchsched/fetcher.py` | 162 |
-| `batchsched/ledger.py` | 290 |
+| `batchsched/executor.py` | 239 |
+| `batchsched/fetcher.py` | 170 |
+| `batchsched/ledger.py` | 298 |
 | `batchsched/mocksite/__init__.py` | 5 |
-| `batchsched/mocksite/app.py` | 137 |
+| `batchsched/mocksite/app.py` | 153 |
 | `batchsched/mocksite/server.py` | 111 |
-| `batchsched/models.py` | 206 |
+| `batchsched/models.py` | 212 |
 | `batchsched/plan_loader.py` | 164 |
 | `batchsched/plan_schema.py` | 299 |
-| `batchsched/reporter.py` | 236 |
+| `batchsched/reporter.py` | 246 |
 | `batchsched/resume.py` | 94 |
 | `batchsched/retry.py` | 54 |
 | `batchsched/scheduler.py` | 240 |
+| `batchsched/truncation.py` | 185 |
 | `tests/conftest.py` | 159 |
 | `tests/test_api.py` | 88 |
 | `tests/test_cli.py` | 76 |
 | `tests/test_dag.py` | 113 |
-| `tests/test_executor.py` | 186 |
-| `tests/test_fetcher.py` | 89 |
-| `tests/test_ledger.py` | 137 |
-| `tests/test_plan_loader.py` | 221 |
-| `tests/test_reporter.py` | 146 |
+| `tests/test_executor.py` | 288 |
+| `tests/test_fetcher.py` | 98 |
+| `tests/test_ledger.py` | 204 |
+| `tests/test_plan_loader.py` | 297 |
+| `tests/test_reporter.py` | 187 |
 | `tests/test_resume.py` | 190 |
 | `tests/test_retry.py` | 66 |
 | `tests/test_scheduler.py` | 127 |
-| **Python 合计** | **4345** |
+| `tests/test_truncation.py` | 151 |
+| **Python 合计** | **5067** |
 
 其他文件：
 
 | 文件/目录 | 行数/说明 |
 | --- | ---: |
-| `plans/demo.yaml` | 59 |
+| `plans/demo.yaml` | 62 |
 | `plans/demo_invalid_cycle.yaml` | 19 |
 | `batchsched/mocksite/fixtures/*.json` | 33 |
 | `pyproject.toml` | 31 |
 | `requirements-lock.txt` | 6 |
-| `README.md` | 220 |
+| `README.md` | 234 |
 | `.gitignore` | 8 |
 
-代码规模只计 `.py` 源码与测试，不含 README、DELIVERY、配置和 fixture。
+代码规模只计 `.py` 源码与测试，不含 README、DELIVERY、配置和 fixture。单文件最大 **299 行**，满足 ≤300 行限制。
 
 ## 3. 测试结果
 
 ```text
 $ pytest -q
-........................................................................ [ 91%]
-.......                                                                  [100%]
-79 passed in 5.31s
+........................................................................ [ 66%]
+....................................                                     [100%]
+108 passed
 ```
 
 覆盖重点：
 
-- 非法计划：环、悬空依赖、重复 id、自依赖、未知字段、非法 retry、作业上限、YAML 行号。
+- 非法计划：环、悬空依赖、重复 id、自依赖、未知字段、非法 retry、作业上限、YAML 行号、`max_record_bytes` 取值边界。
 - DAG：拓扑分层、执行前沿、失败/skipped 传导。
 - 调度：并发峰值、计划/全局并发上限、worker 异常隔离、结束状态。
 - 执行：500 三次重试、404 不重试、超时、空 body、超大响应、Content-Type 前置条件、退避上限、SHA-256。
+- 体积预算：预算内原样落盘、JSON 超预算裁剪后仍合法且只保留完整记录、文本字节前缀与 UTF-8 边界、不可裁剪类型归 `too_large`、裁剪后 `size_bytes`/`sha256` 与原始大小分列、`body_truncated` 审计、确定性重放、旧台账迁移。
 - 台账：主键约束、job_result 唯一、attempt 序号、审计顺序。
-- 续跑：中断后 resume、已完成作业不重跑、输出 SHA-256 一致、无重复 job_result。
+- 续跑：中断后 resume、已完成作业不重跑、输出 SHA-256 一致（含裁剪作业）、无重复 job_result。
 - 抓取：非白名单目标零 HTTP 调用并写入 `audit`。
 - API / 报告 / CLI：只读结构、非回环拒绝、无绝对路径、退出码与闭环。
 
@@ -192,10 +195,30 @@ audit= [{'event': 'fetch_rejected', 'detail': 'host=example.invalid reason=host_
 - [x] 4. 中断后 `resume --run <run_id>` 可续跑；完成作业不重跑，输出 SHA-256 与基线一致；真实 KeyboardInterrupt 路径和 stop_event 自动化测试均通过。
 - [x] 5. `report --format json|md` 均可输出；报告路径检查无绝对路径。
 - [x] 6. 抓取层拒绝 `example.invalid`，HTTP 调用为 0，并写入 `fetch_rejected` 审计事件。
-- [x] 7. `pytest -q`：79 passed。
-- [x] 8. Python 代码 4345 行，在 2500–4500 内；单文件最大 299 行，≤300。
+- [x] 7. `pytest -q`：108 passed。
+- [x] 8. Python 代码 5067 行；单文件最大 299 行，≤300。
 - [x] 9. 无真实密钥、公司名、真实目标域名；仅使用 `demo.local`、`example.invalid` 保留域名和回环地址。
 - [x] 10. README 包含定位、差异、快速开始、YAML 样例、错误分类、续跑语义、台账结构、离线合规、测试说明、不实现清单。
+- [x] 11. 作业级 `max_record_bytes` 预算：JSON/文本确定性裁剪、不可裁剪类型归 `too_large`、裁剪溯源字段与 `body_truncated` 审计齐全，见 4.7。
+
+### 4.7 作业级体积预算与裁剪溯源
+
+`plans/demo.yaml` 的 `fetch_orders` 配置 `max_record_bytes: 200`，原始 `orders.json` 为 332 字节：
+
+```text
+$ python -m batchsched run --plan plans/demo.yaml
+{"job_counts": {"done": 6, "failed": 0, ...}, "status": "completed", ...}
+
+$ cat work/output/runs/<run_id>/fetch_orders.raw
+{"dataset":"orders","source":"http://demo.local/orders","orders":[{"id":"ord-1001","catalog_id":"cat-001","quantity":2,"status":"paid"}]}
+```
+
+落盘产物是合法 JSON（紧凑重排后的完整记录级前缀，137 字节），台账中
+`size_bytes=137`、`sha256` 与落盘字节一致、`original_size_bytes=332`、
+`truncated=1`，并追加 `body_truncated` 审计事件
+（`original_bytes=332 retained_bytes=137`）。Markdown 报告该作业的字节列显示
+`137/332 truncated`，JSON 报告带 `truncated` / `original_size_bytes` 字段。
+重复执行产生相同 sha256，中断续跑后裁剪作业的哈希与完整基线 run 一致。
 
 ## 7. 依赖与离线安装说明
 

@@ -66,6 +66,8 @@ def build_report(
                     result.get("output_path"), base, run_id
                 ),
                 "reason": _safe_text(result.get("reason"), base),
+                "original_size_bytes": result.get("original_size_bytes"),
+                "truncated": bool(result.get("truncated")),
                 "attempts": job_attempts,
             }
         )
@@ -138,7 +140,7 @@ def to_markdown(report: dict[str, Any]) -> str:
                     status=status,
                     job=job["job_id"],
                     attempts=len(job["attempts"]),
-                    size=job["size_bytes"] if job["size_bytes"] is not None else "-",
+                    size=_size_cell(job),
                     sha=(job["sha256"] or "-")[:12],
                     reason=_cell(job["reason"] or "-"),
                 )
@@ -228,6 +230,14 @@ def _safe_text(value: str | None, base: Path) -> str | None:
 
 def _cell(value: str) -> str:
     return value.replace("|", "\\|")
+
+
+def _size_cell(job: dict[str, Any]) -> str:
+    if job["size_bytes"] is None:
+        return "-"
+    if job.get("truncated") and job.get("original_size_bytes") is not None:
+        return f"{job['size_bytes']}/{job['original_size_bytes']} truncated"
+    return str(job["size_bytes"])
 
 
 def _inline_classes(counts: dict[str, int]) -> str:

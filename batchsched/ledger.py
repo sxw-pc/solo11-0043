@@ -38,6 +38,8 @@ CREATE TABLE IF NOT EXISTS job_results (
   size_bytes INTEGER,
   output_path TEXT,
   reason TEXT,
+  original_size_bytes INTEGER,
+  truncated INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (run_id, job_id)
 );
 CREATE TABLE IF NOT EXISTS audit (
@@ -79,6 +81,21 @@ class Ledger:
         with self._connection() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.executescript(_SCHEMA)
+            self._migrate_job_results(connection)
+
+    def _migrate_job_results(self, connection: sqlite3.Connection) -> None:
+        """Add truncation columns to ledgers created before the budget feature."""
+
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(job_results)")}
+        additions = (
+            ("original_size_bytes", "INTEGER"),
+            ("truncated", "INTEGER NOT NULL DEFAULT 0"),
+        )
+        for name, declaration in additions:
+            if name not in columns:
+                connection.execute(
+                    f"ALTER TABLE job_results ADD COLUMN {name} {declaration}"
+                )
 
     def create_run(
         self,
@@ -87,12 +104,7 @@ class Ledger:
         started_at: str,
         status: str = config.RUN_RUNNING,
     ) -> None:
-        with self._connection() as connection:
-            connection.execute(
-                "INSERT INTO runs(run_id, plan_path, started_at, status)"
-                " VALUES (?, ?, ?, ?)",
-                (run_id, plan_path, started_at, status),
-            )
+        self._insert_run(run_id, plan_path, started_at, status, "INSERT")
 
     def ensure_run(
         self,
@@ -101,9 +113,14 @@ class Ledger:
         started_at: str,
         status: str = config.RUN_RUNNING,
     ) -> None:
+        self._insert_run(run_id, plan_path, started_at, status, "INSERT OR IGNORE")
+
+    def _insert_run(
+        self, run_id: str, plan_path: str, started_at: str, status: str, verb: str
+    ) -> None:
         with self._connection() as connection:
             connection.execute(
-                "INSERT OR IGNORE INTO runs(run_id, plan_path, started_at, status)"
+                f"{verb} INTO runs(run_id, plan_path, started_at, status)"
                 " VALUES (?, ?, ?, ?)",
                 (run_id, plan_path, started_at, status),
             )
@@ -135,34 +152,30 @@ class Ledger:
                 "INSERT INTO attempts(run_id, job_id, attempt_no, error_class,"
                 " duration_ms, backoff_ms, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
-                    attempt.run_id,
-                    attempt.job_id,
-                    attempt.attempt_no,
-                    attempt.error_class,
-                    attempt.duration_ms,
-                    attempt.backoff_ms,
+                    attempt.run_id, attempt.job_id, attempt.attempt_no,
+                    attempt.error_class, attempt.duration_ms, attempt.backoff_ms,
                     attempt.started_at,
                 ),
             )
 
     def save_job_result(self, result: JobResult) -> None:
+        columns = ("run_id", "job_id", "status", "sha256", "size_bytes",
+                   "output_path", "reason", "original_size_bytes", "truncated")
+        values = (result.run_id, result.job_id, result.status, result.sha256,
+                  result.size_bytes, result.output_path, result.reason,
+                  result.original_size_bytes, 1 if result.truncated else 0)
+        placeholders = ", ".join("?" for _ in columns)
+        updates = ", ".join(
+            f"{name}=excluded.{name}"
+            for name in columns
+            if name not in ("run_id", "job_id")
+        )
         with self._connection() as connection:
             connection.execute(
-                "INSERT INTO job_results(run_id, job_id, status, sha256, size_bytes,"
-                " output_path, reason) VALUES (?, ?, ?, ?, ?, ?, ?)"
-                " ON CONFLICT(run_id, job_id) DO UPDATE SET"
-                " status=excluded.status, sha256=excluded.sha256,"
-                " size_bytes=excluded.size_bytes, output_path=excluded.output_path,"
-                " reason=excluded.reason",
-                (
-                    result.run_id,
-                    result.job_id,
-                    result.status,
-                    result.sha256,
-                    result.size_bytes,
-                    result.output_path,
-                    result.reason,
-                ),
+                f"INSERT INTO job_results({', '.join(columns)})"
+                f" VALUES ({placeholders})"
+                f" ON CONFLICT(run_id, job_id) DO UPDATE SET {updates}",
+                values,
             )
 
     def add_audit(
@@ -205,13 +218,11 @@ class Ledger:
             ).fetchall()
         return [
             JobResult(
-                run_id=row["run_id"],
-                job_id=row["job_id"],
-                status=row["status"],
-                sha256=row["sha256"],
-                size_bytes=row["size_bytes"],
-                output_path=row["output_path"],
-                reason=row["reason"],
+                run_id=row["run_id"], job_id=row["job_id"], status=row["status"],
+                sha256=row["sha256"], size_bytes=row["size_bytes"],
+                output_path=row["output_path"], reason=row["reason"],
+                original_size_bytes=row["original_size_bytes"],
+                truncated=bool(row["truncated"]),
             )
             for row in rows
         ]
@@ -244,11 +255,7 @@ class Ledger:
         results = self.get_job_results(run_id)
         attempts = self.get_attempts(run_id)
         audit = self.get_audit(run_id)
-        counts = {
-            config.JOB_DONE: 0,
-            config.JOB_FAILED: 0,
-            config.JOB_SKIPPED: 0,
-        }
+        counts = {config.JOB_DONE: 0, config.JOB_FAILED: 0, config.JOB_SKIPPED: 0}
         for result in results:
             counts[result.status] = counts.get(result.status, 0) + 1
         return {
@@ -287,4 +294,6 @@ def _result_dict(result: JobResult) -> dict[str, Any]:
         "size_bytes": result.size_bytes,
         "output_path": result.output_path,
         "reason": result.reason,
+        "original_size_bytes": result.original_size_bytes,
+        "truncated": result.truncated,
     }

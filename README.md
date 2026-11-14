@@ -76,6 +76,7 @@ jobs:
     params:
       expect_content_type: application/json
       min_bytes: 10
+      max_record_bytes: 4096
 ```
 
 字段规则：
@@ -87,6 +88,7 @@ jobs:
 - 未知的顶层字段、作业字段和 retry 字段都会被拒绝。
 - 作业数上限 200；并发上限 8；重试次数 1–5；退避基数 0–10000 ms；单作业累计退避不超过 10 s。
 - `retryable` 可以显式覆盖默认可重试错误集合。
+- `params.max_record_bytes` 是可选的作业级体积预算，必须是 1..2097152（全局 2 MB 上限）之间的整数，非法值在计划校验期以 `invalid_max_record_bytes` 拒绝。
 
 ## 执行语义
 
@@ -98,6 +100,16 @@ jobs:
 6. 每次尝试写入 `attempts`；每个作业在同一个 run 下只有一条 `job_results`（主键 `(run_id, job_id)`）。
 7. run 的最终状态为 `completed`（全部 done）、`failed`（存在 failed/skipped）或 `interrupted`（收到中断）。
 8. `run` 在 5600 端口不可用时会自动启动内置 mock 站点，结束后停止它；如果 `serve` 已在运行则复用，不会重复启动。
+
+## 作业级体积预算与确定性裁剪
+
+`params.max_record_bytes` 给单个作业设定比全局 2 MB 更小的体积预算。响应体未超全局上限、但超过作业预算时**不判失败**，而是按内容类型做确定性裁剪，作业仍记 `done`：
+
+- **JSON 类**（`application/json`、`text/json`、`*+json`，大小写与参数不敏感）：解析后按容器条目从尾部丢弃，保留“完整记录级前缀”——留下的每条记录都是完整值，紧凑重新序列化后保证仍是合法 JSON，绝不截断在字符串或数字中间。标量 JSON（单个字符串/数字）无法缩短时失败关闭。
+- **文本类**（`text/*`）：按字节取前缀；UTF-8 文本额外回退未写完的多字节序列尾部，保证产物仍可解码；其他 charset 保留纯字节前缀。
+- **不可安全裁剪的类型**（如 `application/octet-stream`、`image/png`、空 Content-Type）超预算按 `too_large` 失败（不可重试），与全局上限行为一致。
+
+裁剪产物的 `sha256` 与 `size_bytes` 对应**裁剪后**实际落盘字节；另记 `original_size_bytes`（原始大小）与 `truncated`（是否裁剪），并追加一条 `body_truncated` 审计事件（含 `original_bytes` / `retained_bytes`）。预算内的响应原样落盘，这两个溯源字段留空。裁剪逻辑是纯函数：同一份输入重复执行得到字节级一致的产物，因此中断续跑和报告里的输出大小始终与落盘内容一致。
 
 ## 错误分类
 
@@ -135,8 +147,8 @@ python -m batchsched resume --run <run_id>
 | --- | --- | --- |
 | `runs` | `run_id`, `plan_path`, `started_at`, `finished_at`, `status`, `summary_json` | 一次调度 run |
 | `attempts` | `run_id`, `job_id`, `attempt_no`, `error_class`, `duration_ms`, `backoff_ms`, `started_at` | 每次尝试；主键阻止重复序号 |
-| `job_results` | `run_id`, `job_id`, `status`, `sha256`, `size_bytes`, `output_path`, `reason` | 每个作业的终态；主键保证唯一 |
-| `audit` | `run_id`, `event`, `detail`, `at` | 拒绝、重试、续跑、完成等事件 |
+| `job_results` | `run_id`, `job_id`, `status`, `sha256`, `size_bytes`, `output_path`, `reason`, `original_size_bytes`, `truncated` | 每个作业的终态；主键保证唯一；后两列记录裁剪溯源，旧台账自动补列 |
+| `audit` | `run_id`, `event`, `detail`, `at` | 拒绝、重试、续跑、`body_truncated`、完成等事件 |
 
 ## 报告
 
@@ -160,14 +172,15 @@ python -m batchsched resume --run <run_id>
 pytest -q
 ```
 
-当前共有 **79 个测试项**，覆盖：
+当前共有 **108 个测试项**，覆盖：
 
-- 计划校验：重复 id、悬空依赖、自依赖、环、未知字段、非法 retry、作业上限、YAML 语法与行号。
+- 计划校验：重复 id、悬空依赖、自依赖、环、未知字段、非法 retry、作业上限、YAML 语法与行号、`max_record_bytes` 取值边界。
 - DAG：拓扑分层、执行前沿、失败/skipped 传导、下游计算。
 - 调度：并发峰值、显式并发上限、失败跳过、已有 done 不重跑、中断、worker 异常隔离。
 - 抓取与执行：白名单拒绝且零 HTTP 调用、500/404/超时/空 body/超大响应分类、固定/指数退避、4xx 不重试、退避上限、输出 SHA-256。
-- 台账与续跑：唯一约束、attempt 序号、resume 不重复 job_result、中断后 SHA-256 与完整执行一致、`resumed` 审计。
-- API 与报告：只读端点、非回环拒绝、JSON/Markdown 结构、报告无绝对路径。
+- 体积预算：预算内原样落盘、JSON 超预算裁剪后仍为合法 JSON 且只保留完整记录、文本字节前缀与 UTF-8 边界、不可裁剪类型归 `too_large`、裁剪后 `size_bytes`/`sha256` 与原始大小分开记录、`body_truncated` 审计、重复执行确定性、旧台账 schema 迁移。
+- 台账与续跑：唯一约束、attempt 序号、resume 不重复 job_result、中断后 SHA-256 与完整执行一致（含裁剪作业）、`resumed` 审计。
+- API 与报告：只读端点、非回环拒绝、JSON/Markdown 结构、报告无绝对路径、裁剪字段与 `retained/original truncated` 标注。
 - CLI：计划退出码、run/report 闭环。
 
 测试全部使用 `tmp_path` 和临时端口，不污染仓库运行目录。
@@ -195,8 +208,9 @@ batchsched/
   plan_schema.py       字段级校验与行号辅助
   dag.py               拓扑分层、前沿、跳过传导
   scheduler.py         并发派发与终态收敛
-  executor.py          单作业抓取、落盘、重试
+  executor.py          单作业抓取、落盘、重试与体积预算裁剪
   fetcher.py           白名单 + 本机 HTTP 抓取
+  truncation.py        确定性 JSON/文本语义安全裁剪（纯函数）
   ledger.py            SQLite 台账（唯一 SQL 层）
   retry.py             退避算术与上限
   resume.py            断点续跑

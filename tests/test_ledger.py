@@ -135,3 +135,70 @@ def test_run_details_aggregate(ledger, active_run):
     assert details["total_attempts"] == 1
     assert len(details["jobs"]) == 2
     assert ledger.get_run_details("missing") is None
+
+
+def test_truncation_fields_round_trip(ledger, active_run):
+    ledger.save_job_result(
+        JobResult(
+            run_id=active_run,
+            job_id="job_trimmed",
+            status=config.JOB_DONE,
+            sha256="b" * 64,
+            size_bytes=80,
+            original_size_bytes=200,
+            truncated=True,
+            output_path="work/output/runs/x/job_trimmed.raw",
+        )
+    )
+    result = ledger.get_job_results(active_run)[0]
+    assert result.truncated is True
+    assert result.original_size_bytes == 200
+    assert result.size_bytes == 80
+    detail = next(
+        item
+        for item in ledger.get_run_details(active_run)["jobs"]
+        if item["job_id"] == "job_trimmed"
+    )
+    assert detail["truncated"] is True
+    assert detail["original_size_bytes"] == 200
+
+
+def test_legacy_ledger_is_migrated_with_truncation_columns(tmp_path):
+    import sqlite3
+
+    db_path = tmp_path / "legacy.sqlite3"
+    connection = sqlite3.connect(db_path)
+    connection.executescript(
+        """
+        CREATE TABLE job_results (
+          run_id TEXT NOT NULL,
+          job_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          sha256 TEXT,
+          size_bytes INTEGER,
+          output_path TEXT,
+          reason TEXT,
+          PRIMARY KEY (run_id, job_id)
+        );
+        INSERT INTO job_results(run_id, job_id, status) VALUES ('run-old', 'j', 'done');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    migrated = Ledger(db_path)
+    rows = migrated.get_job_results("run-old")
+    assert rows and rows[0].truncated is False
+    assert rows[0].original_size_bytes is None
+    migrated.save_job_result(
+        JobResult(
+            run_id="run-old",
+            job_id="j2",
+            status=config.JOB_DONE,
+            size_bytes=5,
+            original_size_bytes=9,
+            truncated=True,
+        )
+    )
+    assert migrated.get_job_results("run-old")[0].job_id == "j"
+    assert migrated.get_job_results("run-old")[1].truncated is True

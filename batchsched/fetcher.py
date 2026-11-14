@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 import requests
 
 from . import config
+from .truncation import media_family
 
 AuditHook = Callable[[str, str], None]
 
@@ -25,6 +26,12 @@ class FetchResponse:
     content_type: str
     elapsed_ms: int
     url: str
+
+    @property
+    def media_family(self) -> str | None:
+        """Truncation family ("json"/"text") or None when not truncatable."""
+
+        return media_family(self.content_type)
 
 
 class FetchError(RuntimeError):

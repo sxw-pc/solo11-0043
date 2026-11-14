@@ -140,6 +140,8 @@ class JobResult:
     size_bytes: int | None = None
     output_path: str | None = None
     reason: str | None = None
+    original_size_bytes: int | None = None
+    truncated: bool = False
 
     @property
     def is_terminal(self) -> bool:
@@ -156,6 +158,8 @@ class ExecutionOutcome:
     output_path: str | None = None
     error_class: str | None = None
     attempts: int = 0
+    original_size_bytes: int | None = None
+    truncated: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -167,6 +171,8 @@ class ExecutionOutcome:
             "output_path": self.output_path,
             "error_class": self.error_class,
             "attempts": self.attempts,
+            "original_size_bytes": self.original_size_bytes,
+            "truncated": self.truncated,
         }
 
 

@@ -12,13 +12,7 @@ from .models import JobSpec, RetryPolicy, ValidationIssue
 
 ALLOWED_TOP = {"name", "concurrency", "jobs"}
 ALLOWED_JOB = {"id", "source", "depends_on", "retry", "params"}
-ALLOWED_RETRY = {
-    "mode",
-    "max_attempts",
-    "base_delay_ms",
-    "retryable",
-    "max_total_delay_ms",
-}
+ALLOWED_RETRY = {"mode", "max_attempts", "base_delay_ms", "retryable", "max_total_delay_ms"}
 ID_RE = re.compile(config.JOB_ID_PATTERN)
 
 
@@ -82,17 +76,7 @@ def parse_job(
                 )
             else:
                 deps.append(dep)
-    params = raw.get("params", {})
-    if not isinstance(params, dict):
-        issues.append(
-            ValidationIssue(
-                "invalid_params",
-                "params must be a mapping",
-                field_lines.get("params", line),
-                job_id,
-            )
-        )
-        params = {}
+    params = parse_params(raw.get("params", {}), field_lines.get("params", line), job_id, issues)
     retry = parse_retry(raw.get("retry"), field_lines.get("retry", line), job_id, issues)
     return JobSpec(
         id=job_id,
@@ -101,6 +85,35 @@ def parse_job(
         retry=retry,
         params=dict(params),
     )
+
+
+def parse_params(
+    raw: Any,
+    line: int | None,
+    job_id: str,
+    issues: list[ValidationIssue],
+) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        issues.append(
+            ValidationIssue("invalid_params", "params must be a mapping", line, job_id)
+        )
+        return {}
+    params = dict(raw)
+    budget = params.get("max_record_bytes")
+    if budget is not None and (
+        not is_int(budget) or not 1 <= budget <= config.MAX_RESPONSE_BYTES
+    ):
+        issues.append(
+            ValidationIssue(
+                "invalid_max_record_bytes",
+                f"params.max_record_bytes must be an integer 1.."
+                f"{config.MAX_RESPONSE_BYTES}",
+                line,
+                job_id,
+            )
+        )
+        params.pop("max_record_bytes")
+    return params
 
 
 def parse_retry(
@@ -120,10 +133,15 @@ def parse_retry(
     for key in raw:
         if key not in ALLOWED_RETRY:
             issues.append(
-                ValidationIssue(
-                    "unknown_field", f"unknown retry field: {key}", line, job_id
-                )
+                ValidationIssue("unknown_field", f"unknown retry field: {key}", line, job_id)
             )
+
+    def int_field(value: Any, code: str, message: str, low: int, high: int, fallback: int) -> int:
+        if is_int(value) and low <= value <= high:
+            return int(value)
+        issues.append(ValidationIssue(code, message, line, job_id))
+        return fallback
+
     mode = raw.get("mode", defaults.mode)
     if mode not in ("fixed", "exponential"):
         issues.append(
@@ -135,42 +153,31 @@ def parse_retry(
             )
         )
         mode = defaults.mode
-    attempts = raw.get("max_attempts", defaults.max_attempts)
-    if not is_int(attempts) or not 1 <= attempts <= config.MAX_ATTEMPTS:
-        issues.append(
-            ValidationIssue(
-                "invalid_max_attempts",
-                f"retry.max_attempts must be 1..{config.MAX_ATTEMPTS}",
-                line,
-                job_id,
-            )
-        )
-        attempts = defaults.max_attempts
-    delay = raw.get("base_delay_ms", defaults.base_delay_ms)
-    if not is_int(delay) or not (
-        config.MIN_ATTEMPT_DELAY_MS <= delay <= config.MAX_ATTEMPT_DELAY_MS
-    ):
-        issues.append(
-            ValidationIssue(
-                "invalid_base_delay",
-                f"retry.base_delay_ms must be {config.MIN_ATTEMPT_DELAY_MS}.."
-                f"{config.MAX_ATTEMPT_DELAY_MS}",
-                line,
-                job_id,
-            )
-        )
-        delay = defaults.base_delay_ms
-    cap = raw.get("max_total_delay_ms", config.MAX_BACKOFF_TOTAL_MS)
-    if not is_int(cap) or not 0 <= cap <= config.MAX_BACKOFF_TOTAL_MS:
-        issues.append(
-            ValidationIssue(
-                "invalid_retry_cap",
-                f"retry.max_total_delay_ms must be 0..{config.MAX_BACKOFF_TOTAL_MS}",
-                line,
-                job_id,
-            )
-        )
-        cap = config.MAX_BACKOFF_TOTAL_MS
+    attempts = int_field(
+        raw.get("max_attempts", defaults.max_attempts),
+        "invalid_max_attempts",
+        f"retry.max_attempts must be 1..{config.MAX_ATTEMPTS}",
+        1,
+        config.MAX_ATTEMPTS,
+        defaults.max_attempts,
+    )
+    delay = int_field(
+        raw.get("base_delay_ms", defaults.base_delay_ms),
+        "invalid_base_delay",
+        f"retry.base_delay_ms must be {config.MIN_ATTEMPT_DELAY_MS}.."
+        f"{config.MAX_ATTEMPT_DELAY_MS}",
+        config.MIN_ATTEMPT_DELAY_MS,
+        config.MAX_ATTEMPT_DELAY_MS,
+        defaults.base_delay_ms,
+    )
+    cap = int_field(
+        raw.get("max_total_delay_ms", config.MAX_BACKOFF_TOTAL_MS),
+        "invalid_retry_cap",
+        f"retry.max_total_delay_ms must be 0..{config.MAX_BACKOFF_TOTAL_MS}",
+        0,
+        config.MAX_BACKOFF_TOTAL_MS,
+        config.MAX_BACKOFF_TOTAL_MS,
+    )
     retryable_raw = raw.get("retryable")
     retryable: frozenset[str] | None = None
     if retryable_raw is not None:
@@ -181,8 +188,7 @@ def parse_retry(
                 ValidationIssue(
                     "invalid_retryable",
                     "retry.retryable must be a list of error classes",
-                    line,
-                    job_id,
+                    line, job_id,
                 )
             )
         else:
@@ -192,8 +198,7 @@ def parse_retry(
                     ValidationIssue(
                         "invalid_retryable",
                         "unknown error class(es): " + ", ".join(unknown),
-                        line,
-                        job_id,
+                        line, job_id,
                     )
                 )
             retryable = frozenset(
@@ -201,10 +206,10 @@ def parse_retry(
             )
     return RetryPolicy(
         mode=str(mode),
-        max_attempts=int(attempts),
-        base_delay_ms=int(delay),
+        max_attempts=attempts,
+        base_delay_ms=delay,
         retryable=retryable,
-        max_total_delay_ms=int(cap),
+        max_total_delay_ms=cap,
     )
 
 
@@ -259,12 +264,11 @@ def line_of(node: Any) -> int | None:
 def key_lines(node: Any) -> dict[str, int]:
     if not isinstance(node, yaml.MappingNode):
         return {}
-    result: dict[str, int] = {}
-    for key_node, value_node in node.value:
-        key = getattr(key_node, "value", None)
-        if isinstance(key, str):
-            result[key] = line_of(value_node) or line_of(key_node) or 0
-    return result
+    return {
+        key: (line_of(value_node) or line_of(key_node) or 0)
+        for key_node, value_node in node.value
+        if isinstance((key := getattr(key_node, "value", None)), str)
+    }
 
 
 def job_nodes(root: Any) -> list[Any]:
@@ -286,11 +290,7 @@ def check_duplicate_keys(node: Any, issues: list[ValidationIssue]) -> None:
             if isinstance(key, str):
                 if key in seen:
                     issues.append(
-                        ValidationIssue(
-                            "duplicate_key",
-                            f"duplicate YAML key: {key}",
-                            line_of(key_node),
-                        )
+                        ValidationIssue("duplicate_key", f"duplicate YAML key: {key}", line_of(key_node))
                     )
                 seen.add(key)
             check_duplicate_keys(value_node, issues)

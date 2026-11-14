@@ -14,32 +14,17 @@ def _job(
     retry: RetryPolicy | None = None,
     params: dict | None = None,
 ) -> JobSpec:
-    return JobSpec(
-        id="job_one",
-        source=source,
-        retry=retry or RetryPolicy(),
-        params=params or {},
-    )
+    return JobSpec(id="job_one", source=source, retry=retry or RetryPolicy(),
+                   params=params or {})
 
 
 def _executor(
-    mock_base_url,
-    ledger,
-    run_id,
-    output_dir,
-    sleeps,
-    timeout=1.0,
-    max_bytes=config.MAX_RESPONSE_BYTES,
-    max_total_delay_ms=None,
+    mock_base_url, ledger, run_id, output_dir, sleeps,
+    timeout=1.0, max_bytes=config.MAX_RESPONSE_BYTES, max_total_delay_ms=None,
 ):
-    fetcher = Fetcher(
-        base_url=mock_base_url, timeout_seconds=timeout, max_bytes=max_bytes
-    )
+    fetcher = Fetcher(base_url=mock_base_url, timeout_seconds=timeout, max_bytes=max_bytes)
     return JobExecutor(
-        fetcher,
-        ledger,
-        run_id,
-        output_dir,
+        fetcher, ledger, run_id, output_dir,
         sleep_fn=lambda seconds: sleeps.append(seconds),
         max_total_delay_ms=max_total_delay_ms,
     )
@@ -184,3 +169,120 @@ def test_attempt_number_continues_after_existing_attempt(
     assert outcome.status == config.JOB_DONE
     attempts = ledger.get_attempts(active_run)
     assert [item["attempt_no"] for item in attempts] == [1, 2]
+
+
+def test_within_budget_is_persisted_unchanged(
+    mock_base_url, ledger, active_run, output_dir
+):
+    executor = _executor(mock_base_url, ledger, active_run, output_dir, [])
+    retry = RetryPolicy(mode="fixed", max_attempts=1, base_delay_ms=50)
+    outcome = executor.execute(
+        _job("/api/catalog", retry=retry, params={"max_record_bytes": 4096})
+    )
+    assert outcome.status == config.JOB_DONE
+    assert outcome.truncated is False
+    assert outcome.original_size_bytes is None
+    raw = (output_dir / "job_one.raw").read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == outcome.sha256
+    assert outcome.size_bytes == len(raw)
+    result = ledger.get_job_results(active_run)[0]
+    assert result.truncated is False and result.original_size_bytes is None
+    assert "body_truncated" not in [
+        item["event"] for item in ledger.get_audit(active_run)
+    ]
+
+
+def test_json_over_budget_is_truncated_into_valid_output(
+    mock_base_url, ledger, active_run, output_dir
+):
+    import json
+
+    executor = _executor(mock_base_url, ledger, active_run, output_dir, [])
+    retry = RetryPolicy(mode="fixed", max_attempts=1, base_delay_ms=50)
+    source = "/api/large-json?records=120"
+    original_size = len(Fetcher(base_url=mock_base_url).fetch(source).content)
+    outcome = executor.execute(
+        _job(source, retry=retry, params={"max_record_bytes": 600})
+    )
+    assert outcome.status == config.JOB_DONE
+    assert outcome.truncated is True
+    assert outcome.original_size_bytes == original_size
+    assert outcome.size_bytes <= 600 < original_size
+    persisted = (output_dir / "job_one.raw").read_bytes()
+    assert len(persisted) == outcome.size_bytes
+    assert hashlib.sha256(persisted).hexdigest() == outcome.sha256
+    parsed = json.loads(persisted.decode("utf-8"))
+    assert "records" in parsed and len(parsed["records"]) < 120
+    result = ledger.get_job_results(active_run)[0]
+    assert (result.truncated, result.original_size_bytes, result.size_bytes) == (
+        True,
+        original_size,
+        outcome.size_bytes,
+    )
+    assert result.sha256 == outcome.sha256
+    events = [
+        item for item in ledger.get_audit(active_run)
+        if item["event"] == "body_truncated"
+    ]
+    assert len(events) == 1
+    assert f"original_bytes={original_size}" in events[0]["detail"]
+    assert f"retained_bytes={outcome.size_bytes}" in events[0]["detail"]
+
+
+def test_text_over_budget_uses_byte_prefix(
+    mock_base_url, ledger, active_run, output_dir
+):
+    executor = _executor(mock_base_url, ledger, active_run, output_dir, [])
+    retry = RetryPolicy(mode="fixed", max_attempts=1, base_delay_ms=50)
+    outcome = executor.execute(
+        _job("/api/text", retry=retry, params={"max_record_bytes": 10})
+    )
+    assert outcome.status == config.JOB_DONE and outcome.truncated is True
+    persisted = (output_dir / "job_one.raw").read_bytes()
+    assert persisted == b"plain text"
+    assert len(persisted) == outcome.size_bytes == 10
+    assert outcome.original_size_bytes == len(b"plain text fixture\n")
+    assert hashlib.sha256(persisted).hexdigest() == outcome.sha256
+
+
+def test_unsafe_media_type_over_budget_fails_as_too_large(
+    mock_base_url, ledger, active_run, output_dir
+):
+    executor = _executor(
+        mock_base_url, ledger, active_run, output_dir, [], max_bytes=128 * 1024
+    )
+    retry = RetryPolicy(mode="fixed", max_attempts=3, base_delay_ms=50)
+    outcome = executor.execute(
+        _job("/api/large", retry=retry, params={"max_record_bytes": 1024})
+    )
+    assert outcome.status == config.JOB_FAILED
+    assert outcome.error_class == "too_large"
+    assert "not safely truncatable" in (outcome.reason or "")
+    assert not (output_dir / "job_one.raw").exists()
+    result = ledger.get_job_results(active_run)[0]
+    assert result.status == config.JOB_FAILED
+    assert result.truncated is False and result.original_size_bytes is None
+    assert "body_truncated" not in [
+        item["event"] for item in ledger.get_audit(active_run)
+    ]
+
+
+def test_truncation_is_deterministic_across_executions(
+    mock_base_url, ledger, tmp_path
+):
+    retry = RetryPolicy(mode="fixed", max_attempts=1, base_delay_ms=50)
+    digests = []
+    for run_id in ("run-det-1", "run-det-2"):
+        ledger.create_run(run_id, "plans/test.yaml", config.utc_now_iso())
+        out_dir = tmp_path / run_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        executor = _executor(mock_base_url, ledger, run_id, out_dir, [])
+        outcome = executor.execute(
+            _job(
+                "/api/large-json?records=80",
+                retry=retry,
+                params={"max_record_bytes": 500},
+            )
+        )
+        digests.append((outcome.sha256, outcome.size_bytes))
+    assert digests[0] == digests[1]

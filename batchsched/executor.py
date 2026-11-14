@@ -13,6 +13,7 @@ from .fetcher import FetchError, Fetcher
 from .ledger import Ledger
 from .models import AttemptRecord, ExecutionOutcome, JobResult, JobSpec
 from .retry import next_backoff_ms
+from .truncation import TruncationError, truncate_body
 
 SleepFn = Callable[[float], None]
 
@@ -57,9 +58,12 @@ class JobExecutor:
             try:
                 response = self.fetcher.fetch(job.source)
                 self._check_preconditions(job, response.content, response.content_type)
-                digest = hashlib.sha256(response.content).hexdigest()
-                size_bytes = len(response.content)
-                self._write_output(job.id, response.content, digest)
+                persisted, original_size, truncated = self._apply_budget(
+                    job, response.content, response.content_type
+                )
+                digest = hashlib.sha256(persisted).hexdigest()
+                size_bytes = len(persisted)
+                self._write_output(job.id, persisted, digest)
                 ledger_path = config.run_output_relative(self.run_id, f"{job.id}.raw")
                 self.ledger.record_attempt(
                     AttemptRecord(
@@ -81,8 +85,18 @@ class JobExecutor:
                         size_bytes=size_bytes,
                         output_path=ledger_path,
                         reason=None,
+                        original_size_bytes=original_size if truncated else None,
+                        truncated=truncated,
                     )
                 )
+                if truncated:
+                    self.ledger.add_audit(
+                        self.run_id,
+                        "body_truncated",
+                        f"job={job.id} attempt={attempt_no}"
+                        f" original_bytes={original_size}"
+                        f" retained_bytes={size_bytes}",
+                    )
                 self.ledger.add_audit(
                     self.run_id,
                     "job_done",
@@ -95,6 +109,8 @@ class JobExecutor:
                     size_bytes=size_bytes,
                     output_path=ledger_path,
                     attempts=attempt_no,
+                    original_size_bytes=original_size if truncated else None,
+                    truncated=truncated,
                 )
             except FetchError as exc:
                 error_class = exc.error_class
@@ -158,6 +174,33 @@ class JobExecutor:
                     "parse_precondition",
                     f"body shorter than min_bytes ({len(content)} < {min_bytes})",
                 )
+
+    def _apply_budget(
+        self, job: JobSpec, content: bytes, content_type: str
+    ) -> tuple[bytes, int, bool]:
+        """Apply the job-level max_record_bytes budget.
+
+        Returns ``(persisted_bytes, original_size, truncated)``.  Bodies over
+        budget but outside the safely truncatable families fail as
+        ``too_large`` (non-retryable) just like the global cap.
+        """
+
+        budget = job.params.get("max_record_bytes")
+        if budget is None:
+            return content, len(content), False
+        if not isinstance(budget, int) or isinstance(budget, bool) or budget < 1:
+            raise FetchError(
+                "parse_precondition", "max_record_bytes must be a positive integer"
+            )
+        try:
+            result = truncate_body(content, content_type, budget)
+        except TruncationError as exc:
+            raise FetchError(
+                "too_large",
+                f"body {len(content)} bytes exceeds budget {budget} and is not"
+                f" safely truncatable: {exc}",
+            ) from exc
+        return result.content, result.original_size, result.truncated
 
     def _write_output(self, job_id: str, content: bytes, digest: str) -> Path:
         target = self.output_dir / f"{job_id}.raw"

@@ -20,6 +20,9 @@ jobs:
       mode: fixed
       max_attempts: 2
       base_delay_ms: 100
+    params:
+      # 作业级体积预算：orders 原始响应超过 200 字节时按完整 JSON 记录裁剪
+      max_record_bytes: 200
 
   - id: enrich_orders
     source: /api/orders/enriched

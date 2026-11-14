@@ -144,3 +144,44 @@ def test_report_is_deterministic(ledger, tmp_path):
 def test_missing_report_raises_key_error(ledger):
     with pytest.raises(KeyError):
         build_report(ledger, "run-not-found")
+
+
+def test_report_surfaces_truncation_fields(ledger, tmp_path):
+    run_id = "run-trunc-0001"
+    _seed_report(ledger, run_id, tmp_path)
+    ledger.save_job_result(
+        JobResult(
+            run_id=run_id,
+            job_id="fetch_trimmed",
+            status=config.JOB_DONE,
+            sha256="c" * 64,
+            size_bytes=80,
+            original_size_bytes=250,
+            truncated=True,
+            output_path=f"work/output/runs/{run_id}/fetch_trimmed.raw",
+        )
+    )
+    ledger.add_audit(run_id, "body_truncated", "job=fetch_trimmed original_bytes=250")
+    report = build_report(ledger, run_id)
+    job = next(item for item in report["jobs"] if item["job_id"] == "fetch_trimmed")
+    assert job["truncated"] is True
+    assert job["original_size_bytes"] == 250
+    assert job["size_bytes"] == 80
+    assert report["audit_summary"]["body_truncated"] == 1
+    plain = next(item for item in report["jobs"] if item["job_id"] == "fetch_done")
+    assert plain["truncated"] is False
+    assert plain["original_size_bytes"] is None
+
+    markdown = to_markdown(report)
+    assert "80/250 truncated" in markdown
+    json_text = to_json(report)
+    parsed = json.loads(json_text)
+    trimmed = next(
+        item for item in parsed["jobs"] if item["job_id"] == "fetch_trimmed"
+    )
+    assert trimmed == {
+        **trimmed,
+        "truncated": True,
+        "original_size_bytes": 250,
+        "size_bytes": 80,
+    }

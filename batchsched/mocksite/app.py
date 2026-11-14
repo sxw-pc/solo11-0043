@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from threading import Lock
+import json
 import time
 
 from flask import Flask, Response, jsonify, request
@@ -99,6 +100,21 @@ def create_app(
     @app.get("/api/large")
     def large():
         return Response(b"x" * (64 * 1024), content_type="application/octet-stream")
+
+    @app.get("/api/large-json")
+    def large_json():
+        count = min(500, max(1, int(request.args.get("records", "120"))))
+        payload = {
+            "dataset": "large-json",
+            "records": [
+                {"id": index, "label": f"record-{index:04d}", "active": index % 2 == 0}
+                for index in range(count)
+            ],
+        }
+        return Response(
+            json.dumps(payload, ensure_ascii=False),
+            content_type="application/json; charset=utf-8",
+        )
 
     @app.get("/api/empty")
     def empty():

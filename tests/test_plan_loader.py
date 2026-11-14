@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from batchsched import config
 from batchsched.models import PlanValidationError
 from batchsched.plan_loader import load_plan, parse_plan_text
 
@@ -219,3 +220,78 @@ jobs:
     with pytest.raises(PlanValidationError) as caught:
         parse_plan_text(text)
     assert any(issue.code == "duplicate_key" for issue in caught.value.issues)
+
+
+def test_max_record_bytes_is_accepted_and_retained():
+    plan = parse_plan_text(
+        """
+name: budget-plan
+jobs:
+  - id: fetch_one
+    source: /api/catalog
+    params:
+      max_record_bytes: 1024
+"""
+    )
+    assert plan.job("fetch_one").params["max_record_bytes"] == 1024
+
+
+def test_max_record_bytes_accepts_global_cap_boundary():
+    from batchsched import config
+
+    plan = parse_plan_text(
+        f"""
+name: budget-plan
+jobs:
+  - id: fetch_one
+    source: /api/catalog
+    params:
+      max_record_bytes: {config.MAX_RESPONSE_BYTES}
+"""
+    )
+    assert (
+        plan.job("fetch_one").params["max_record_bytes"]
+        == config.MAX_RESPONSE_BYTES
+    )
+
+
+def test_invalid_max_record_bytes_values_are_rejected():
+    cases = (0, -1, 2 * 1024 * 1024 + 1, 1.5, True)
+    for value in cases:
+        text = f"""
+name: budget-plan
+jobs:
+  - id: fetch_one
+    source: /api/catalog
+    params:
+      max_record_bytes: {value}
+"""
+        with pytest.raises(PlanValidationError) as caught:
+            parse_plan_text(text)
+        assert any(
+            issue.code == "invalid_max_record_bytes" for issue in caught.value.issues
+        ), value
+
+
+def test_string_budget_is_rejected_at_execution_time(
+    mock_base_url, ledger, active_run, output_dir
+):
+    from batchsched.executor import JobExecutor
+    from batchsched.fetcher import Fetcher
+    from batchsched.models import JobSpec, RetryPolicy
+
+    executor = JobExecutor(
+        Fetcher(base_url=mock_base_url, timeout_seconds=1.0),
+        ledger,
+        active_run,
+        output_dir,
+    )
+    job = JobSpec(
+        id="job_one",
+        source="/api/catalog",
+        retry=RetryPolicy(mode="fixed", max_attempts=1, base_delay_ms=50),
+        params={"max_record_bytes": "1024"},
+    )
+    outcome = executor.execute(job)
+    assert outcome.status == config.JOB_FAILED
+    assert outcome.error_class == "parse_precondition"

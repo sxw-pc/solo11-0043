@@ -20,6 +20,15 @@ def test_successful_loopback_fetch(mock_base_url):
     assert response.status_code == 200
     assert b"catalog" in response.content
     assert "application/json" in response.content_type
+    assert response.media_family == "json"
+
+
+def test_response_media_family_classification(mock_base_url):
+    fetcher = Fetcher(base_url=mock_base_url, timeout_seconds=1.0)
+    text_response = fetcher.fetch("/api/text")
+    assert text_response.media_family == "text"
+    large_response = fetcher.fetch("/api/large")
+    assert large_response.media_family is None
 
 
 def test_target_allow_list_and_credentials():
