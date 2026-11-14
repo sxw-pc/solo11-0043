@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
 import json
@@ -9,7 +10,7 @@ import sqlite3
 from typing import Any, Iterator
 
 from . import config
-from .models import AttemptRecord, JobResult
+from .models import AttemptRecord, JobResult, error_class_of_reason
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -228,6 +229,28 @@ class Ledger:
         with self._connection() as connection:
             rows = connection.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
+
+    def terminal_failure_classes(self, run_id: str) -> dict[str, int]:
+        """Per-class counts of jobs in a terminal ``failed`` state."""
+
+        counts: Counter[str] = Counter()
+        for result in self.get_job_results(run_id):
+            if result.status != config.JOB_FAILED:
+                continue
+            error_class = error_class_of_reason(result.reason)
+            if error_class is not None:
+                counts[error_class] += 1
+        return dict(sorted(counts.items()))
+
+    def budget_downgraded_jobs(self, run_id: str) -> list[str]:
+        """Jobs skipped because a job-budget class reached its quota."""
+
+        return sorted(
+            result.job_id
+            for result in self.get_job_results(run_id)
+            if result.status == config.JOB_SKIPPED
+            and result.reason == config.BUDGET_EXHAUSTED_REASON
+        )
 
     def get_audit(self, run_id: str) -> list[dict[str, Any]]:
         with self._connection() as connection:

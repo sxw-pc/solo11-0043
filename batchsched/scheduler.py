@@ -10,10 +10,12 @@ from . import config
 from .dag import blocked_jobs, frontier
 from .ledger import Ledger
 from .models import (
+    BudgetTracker,
     ExecutionOutcome,
     JobResult,
     PlanDag,
     SchedulerOutcome,
+    error_class_of_reason,
     terminal_states,
 )
 
@@ -40,9 +42,15 @@ class Scheduler:
         self.stop_event = stop_event
         self.on_event = on_event
         self.states = {job_id: config.JOB_PENDING for job_id in plan.jobs}
+        self.budget = BudgetTracker(plan.job_budget)
         for job_id, status in terminal_states(initial_results or []).items():
             if job_id in self.states:
                 self.states[job_id] = status
+        for result in initial_results or []:
+            if result.job_id in self.states and result.status == config.JOB_FAILED:
+                # A resumed run keeps its earlier terminal failures: the
+                # quota is per run, not per scheduler invocation.
+                self.budget.seed_terminal(error_class_of_reason(result.reason))
 
     def run(self) -> SchedulerOutcome:
         interrupted = False
@@ -56,6 +64,7 @@ class Scheduler:
                     if self.stop_event is not None and self.stop_event.is_set():
                         interrupted = True
                     if not interrupted:
+                        self._apply_budget()
                         self._dispatch(pool, futures)
                     if not futures:
                         break
@@ -80,6 +89,7 @@ class Scheduler:
             "job_counts": counts,
             "total_attempts": len(self.ledger.get_attempts(self.run_id)),
             "interrupted": interrupted,
+            "budget": self.budget.snapshot(),
         }
         self.ledger.finish_run(
             self.run_id, status, config.utc_now_iso(), summary=summary
@@ -117,17 +127,54 @@ class Scheduler:
         ]
         for job_id in available[:free]:
             self.states[job_id] = config.JOB_RUNNING
+            self.budget.record_dispatch()
             futures[pool.submit(self.executor.execute, self.plan.jobs[job_id])] = job_id
             self._emit("job_started", job_id)
 
+    def _apply_budget(self) -> None:
+        """Downgrade every still-pending job once any class hits its quota.
+
+        Runs before the frontier is computed.  Jobs already dispatched keep
+        running to their own terminal result; only jobs that never entered
+        execution are skipped with ``budget_exhausted``.
+        """
+
+        exhausted = self.budget.exhausted_classes()
+        if not exhausted:
+            return
+        classes = ",".join(exhausted)
+        for job_id in sorted(self.states):
+            if self.states[job_id] != config.JOB_PENDING:
+                continue
+            self.states[job_id] = config.JOB_SKIPPED
+            self.budget.record_downgrade(job_id)
+            self.ledger.save_job_result(
+                JobResult(
+                    run_id=self.run_id,
+                    job_id=job_id,
+                    status=config.JOB_SKIPPED,
+                    reason=config.BUDGET_EXHAUSTED_REASON,
+                )
+            )
+            self.ledger.add_audit(
+                self.run_id,
+                "job_skipped",
+                f"job={job_id} reason={config.BUDGET_EXHAUSTED_REASON}"
+                f" exhausted={classes}",
+            )
+            self._emit("job_skipped", job_id)
+
     def _consume(self, job_id: str, future: Future[ExecutionOutcome]) -> None:
+        error_class: str | None = None
         try:
             outcome = future.result()
             status = outcome.status
             reason = outcome.reason
+            error_class = outcome.error_class
         except Exception as exc:  # defensive isolation around a worker
             status = config.JOB_FAILED
             reason = f"network: worker_exception_{exc.__class__.__name__}"
+            error_class = "network"
             self.ledger.save_job_result(
                 JobResult(
                     run_id=self.run_id,
@@ -151,6 +198,9 @@ class Scheduler:
                 )
             )
         self.states[job_id] = status
+        self.budget.record_completion(
+            error_class if status == config.JOB_FAILED else None
+        )
         self._emit(f"job_{status}", job_id)
 
     def _mark_blocked(self) -> None:

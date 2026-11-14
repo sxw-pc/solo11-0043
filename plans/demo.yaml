@@ -2,6 +2,12 @@
 # 127.0.0.1 mock site; no external network is used.
 name: demo-collection
 concurrency: 3
+# Run-level failure quota: once a listed error class reaches this many
+# terminal failures, every still-pending job is skipped with
+# reason=budget_exhausted (jobs already running finish normally).
+# Classes not listed here are unlimited; omitting the field disables it.
+job_budget:
+  http_4xx: 1
 jobs:
   - id: fetch_catalog
     source: /api/catalog

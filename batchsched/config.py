@@ -51,6 +51,10 @@ JOB_FAILED = "failed"
 JOB_SKIPPED = "skipped"
 JOB_TERMINAL = frozenset({JOB_DONE, JOB_FAILED, JOB_SKIPPED})
 
+# Reason recorded when a pending job is skipped because a job_budget class
+# reached its terminal-failure quota for the run.
+BUDGET_EXHAUSTED_REASON = "budget_exhausted"
+
 RUN_RUNNING = "running"
 RUN_COMPLETED = "completed"
 RUN_FAILED = "failed"

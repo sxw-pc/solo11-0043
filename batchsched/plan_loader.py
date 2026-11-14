@@ -17,6 +17,7 @@ from .plan_schema import (
     key_lines,
     line_of,
     parse_job,
+    parse_job_budget,
 )
 
 
@@ -83,6 +84,10 @@ def parse_plan_text(text: str, display_name: str = "<inline>") -> PlanDag:
             )
         )
         concurrency = 1
+
+    job_budget = parse_job_budget(
+        data.get("job_budget"), top_lines.get("job_budget"), issues
+    )
 
     raw_jobs = data.get("jobs")
     if not isinstance(raw_jobs, list) or not raw_jobs:
@@ -160,5 +165,9 @@ def parse_plan_text(text: str, display_name: str = "<inline>") -> PlanDag:
     assert isinstance(name, str)
     assert isinstance(concurrency, int)
     return PlanDag(
-        name=name, concurrency=concurrency, jobs=jobs, plan_path=display_name
+        name=name,
+        concurrency=concurrency,
+        jobs=jobs,
+        plan_path=display_name,
+        job_budget=job_budget,
     )

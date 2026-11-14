@@ -36,6 +36,7 @@ def build_report(
     failure_counts: Counter[str] = Counter(
         str(item["error_class"]) for item in attempts if item["error_class"]
     )
+    budget = _budget_section(ledger, run_id, run)
     audit_counts = Counter(str(item["event"]) for item in details["audit"])
     total_duration_ms = sum(int(item["duration_ms"]) for item in attempts)
     outputs = sorted(
@@ -88,6 +89,7 @@ def build_report(
         "total_duration_ms": total_duration_ms,
         "total_attempt_duration_ms": total_duration_ms,
         "failure_class_counts": dict(sorted(failure_counts.items())),
+        "budget": budget,
         "outputs": outputs,
         "jobs": jobs,
         "resume_history": [
@@ -124,11 +126,38 @@ def to_markdown(report: dict[str, Any]) -> str:
         f"- Total attempt duration: {report['total_attempt_duration_ms']} ms",
         f"- Failure classes: {_inline_classes(report['failure_class_counts'])}",
         "",
-        "## Jobs by status",
+        "## Job budget",
         "",
-        "| Status | Job | Attempts | Bytes | SHA-256 (12) | Reason |",
-        "| --- | --- | ---: | ---: | --- | --- |",
     ]
+    budget = report["budget"]
+    if not budget["limits"] and not budget["downgraded_jobs"]:
+        lines.append("No job budget configured.")
+    else:
+        lines.append(f"- Limits: {_inline_classes(budget['limits'])}")
+        lines.append(
+            "- Terminal failures by class:"
+            f" {_inline_classes(budget['terminal_failures'])}"
+        )
+        lines.append(
+            "- Exhausted classes: "
+            + (", ".join(f"`{name}`" for name in budget["exhausted"]) or "none")
+        )
+        lines.append(
+            "- Downgraded (budget_exhausted): "
+            + (
+                ", ".join(f"`{job}`" for job in budget["downgraded_jobs"])
+                or "none"
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "## Jobs by status",
+            "",
+            "| Status | Job | Attempts | Bytes | SHA-256 (12) | Reason |",
+            "| --- | --- | ---: | ---: | --- | --- |",
+        ]
+    )
     for status in _STATUS_ORDER:
         for job in report["jobs"]:
             if job["status"] != status:
@@ -192,6 +221,38 @@ def to_markdown(report: dict[str, Any]) -> str:
         lines.append("No audit events.")
     lines.append("")
     return "\n".join(lines)
+
+
+def _budget_section(
+    ledger: Ledger, run_id: str, run: dict[str, Any]
+) -> dict[str, Any]:
+    """Per-class quota state for the run.
+
+    Limits and terminal counts come from the scheduler's persisted snapshot
+    when present; terminal counts fall back to parsing stored failure
+    reasons so older runs still report something sensible.  Downgraded jobs
+    are always derived from the ledger (``reason=budget_exhausted``).
+    """
+
+    summary = run.get("summary")
+    snapshot: dict[str, Any] = {}
+    if isinstance(summary, dict):
+        candidate = summary.get("budget")
+        if isinstance(candidate, dict):
+            snapshot = candidate
+    limits = snapshot.get("limits")
+    terminal = snapshot.get("terminal")
+    exhausted = snapshot.get("exhausted")
+    return {
+        "limits": dict(sorted((limits or {}).items())),
+        "terminal_failures": (
+            dict(sorted(terminal.items()))
+            if terminal
+            else ledger.terminal_failure_classes(run_id)
+        ),
+        "exhausted": sorted(str(name) for name in exhausted or []),
+        "downgraded_jobs": ledger.budget_downgraded_jobs(run_id),
+    }
 
 
 def _plan_path(value: str | None, base: Path) -> str:

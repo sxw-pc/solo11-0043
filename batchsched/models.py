@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Mapping
 
 from . import config
 
@@ -103,6 +104,7 @@ class PlanDag:
     concurrency: int
     jobs: dict[str, JobSpec]
     plan_path: str = ""
+    job_budget: dict[str, int] = field(default_factory=dict)
 
     @property
     def job_ids(self) -> list[str]:
@@ -116,7 +118,112 @@ class PlanDag:
             "name": self.name,
             "concurrency": self.concurrency,
             "job_count": len(self.jobs),
+            "job_budget": dict(sorted(self.job_budget.items())),
             "jobs": [self.jobs[job_id].to_dict() for job_id in self.job_ids],
+        }
+
+
+def error_class_of_reason(reason: str | None) -> str | None:
+    """Recover the error class from a persisted failure reason prefix.
+
+    Executors persist reasons as ``"<error_class>: <detail>"``; anything
+    else (``upstream_failed``, ``budget_exhausted``, ...) maps to ``None``.
+    """
+
+    if not reason:
+        return None
+    candidate = reason.split(":", 1)[0].strip()
+    return candidate if candidate in config.ERROR_CLASSES else None
+
+
+class BudgetTracker:
+    """Run-scoped per-error-class terminal-failure quotas.
+
+    The state deliberately keeps the two halves of the budget apart:
+
+    - ``dispatched``: jobs sent to workers but not yet consumed.  They are
+      never counted toward exhaustion and are never skipped by the budget.
+    - ``terminal``: per-class counts of jobs that reached a terminal
+      ``failed`` state.  Only these counts are compared with the limits.
+
+    The scheduler updates the tracker synchronously on its main loop, so
+    dispatch decisions never depend on lagging ledger reads.
+    """
+
+    def __init__(self, limits: Mapping[str, int] | None = None):
+        self._limits = {
+            str(key): int(value) for key, value in (limits or {}).items()
+        }
+        self._terminal: Counter[str] = Counter()
+        self._dispatched = 0
+        self._downgraded: list[str] = []
+
+    @property
+    def limits(self) -> dict[str, int]:
+        return dict(self._limits)
+
+    @property
+    def dispatched(self) -> int:
+        """Jobs currently in flight (dispatched but not yet consumed)."""
+
+        return self._dispatched
+
+    @property
+    def downgraded(self) -> list[str]:
+        """Jobs skipped with ``budget_exhausted``, in dispatch order."""
+
+        return sorted(self._downgraded)
+
+    def terminal_counts(self) -> dict[str, int]:
+        """Per-class terminal failure counts (the "completed" half)."""
+
+        return {
+            key: self._terminal[key]
+            for key in sorted(self._terminal)
+            if self._terminal[key] > 0
+        }
+
+    def exhausted_classes(self) -> list[str]:
+        return sorted(
+            key
+            for key, limit in self._limits.items()
+            if self._terminal[key] >= limit
+        )
+
+    @property
+    def exhausted(self) -> bool:
+        return bool(self.exhausted_classes())
+
+    def record_dispatch(self) -> None:
+        self._dispatched += 1
+
+    def record_completion(self, error_class: str | None = None) -> None:
+        """A dispatched job reached a terminal state.
+
+        ``error_class`` is only set when the job terminally failed; a job
+        never contributes to the counts while it is still in flight.
+        """
+
+        self._dispatched = max(0, self._dispatched - 1)
+        if error_class is not None:
+            self._terminal[error_class] += 1
+
+    def seed_terminal(self, error_class: str | None) -> None:
+        """Count a terminal failure restored from the ledger (resume)."""
+
+        if error_class is not None:
+            self._terminal[error_class] += 1
+
+    def record_downgrade(self, job_id: str) -> None:
+        self._downgraded.append(job_id)
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "limits": self.limits,
+            "terminal": self.terminal_counts(),
+            "dispatched": self._dispatched,
+            "exhausted": self.exhausted_classes(),
+            "downgraded": self.downgraded,
         }
 
 

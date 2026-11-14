@@ -10,7 +10,7 @@ import yaml
 from . import config
 from .models import JobSpec, RetryPolicy, ValidationIssue
 
-ALLOWED_TOP = {"name", "concurrency", "jobs"}
+ALLOWED_TOP = {"name", "concurrency", "jobs", "job_budget"}
 ALLOWED_JOB = {"id", "source", "depends_on", "retry", "params"}
 ALLOWED_RETRY = {
     "mode",
@@ -206,6 +206,52 @@ def parse_retry(
         retryable=retryable,
         max_total_delay_ms=int(cap),
     )
+
+
+def parse_job_budget(
+    raw: Any,
+    line: int | None,
+    issues: list[ValidationIssue],
+) -> dict[str, int]:
+    """Validate the optional run-level per-error-class failure quotas.
+
+    Each key must be a known error class and each value a non-negative
+    integer.  An absent field means "no quota" (unlimited).
+    """
+
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        issues.append(
+            ValidationIssue(
+                "invalid_job_budget",
+                "job_budget must be a mapping of error class to non-negative integer",
+                line,
+            )
+        )
+        return {}
+    budget: dict[str, int] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or key not in config.ERROR_CLASSES:
+            issues.append(
+                ValidationIssue(
+                    "invalid_job_budget",
+                    f"unknown error class in job_budget: {key}",
+                    line,
+                )
+            )
+            continue
+        if not is_int(value) or value < 0:
+            issues.append(
+                ValidationIssue(
+                    "invalid_job_budget",
+                    f"job_budget[{key}] must be a non-negative integer",
+                    line,
+                )
+            )
+            continue
+        budget[key] = int(value)
+    return budget
 
 
 def find_cycle(jobs: dict[str, JobSpec]) -> list[str] | None:
