@@ -85,6 +85,7 @@ def cmd_plan_validate(args: argparse.Namespace) -> int:
             "concurrency": plan.concurrency,
             "layers": layers,
             "plan": _plan_label(Path(args.plan)),
+            "diagnostics_ok": True,
         }
     )
     return 0

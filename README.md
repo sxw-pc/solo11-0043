@@ -88,6 +88,25 @@ jobs:
 - 作业数上限 200；并发上限 8；重试次数 1–5；退避基数 0–10000 ms；单作业累计退避不超过 10 s。
 - `retryable` 可以显式覆盖默认可重试错误集合。
 
+校验失败时，`plan-validate` 的 JSON 在原有 `ok`/`error_count`/`errors` 之外附带
+`diagnostics_ok` 和 `graph_diagnostics`，用于定位图的整体结构：
+
+- 诊断只在**有效子图**上计算：仅包含被 loader 接受的作业；因非法 id、非法
+  source、重复 id 或超出上限而被丢弃的作业不会成为节点。
+- `weakly_connected_component_count` / `weakly_connected_components`：弱连通分量数
+  与每个分量的作业列表。
+- `isolated_jobs`：有效子图中既无入边也无出边的作业（可疑孤岛）；被丢弃节点
+  引用名不会混入该列表。
+- `dangling_dependencies`：指向未进入有效子图的依赖，`reason` 区分
+  `dependency_discarded`（目标被丢弃）与 `dependency_missing`（从未声明）；
+  `dangling_only_jobs` 单独标注这类零度作业，避免与真实孤岛混淆。
+- `discarded_jobs` / `discarded_job_details`：被丢弃的作业与原因。
+- `cycle`：有环时给出环上的 `order`（沿环依赖顺序，首尾节点相同）、每个环上
+  作业的 `indegree`/`outdegree`（基于有效子图）以及 `cycle_indegree`/
+  `cycle_outdegree`（仅环内边），与 `cycle` 错误码来自同一次检测结果。
+
+合法计划输出 `diagnostics_ok: true`，其余字段保持原样。
+
 ## 执行语义
 
 1. `plan-validate` 只读 YAML，不创建数据库。

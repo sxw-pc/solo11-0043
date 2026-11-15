@@ -8,7 +8,8 @@ from typing import Any
 import yaml
 
 from . import config
-from .models import JobSpec, RetryPolicy, ValidationIssue
+from .dag import cycle_summary, degree_classes, weakly_connected_components
+from .models import GraphDiagnostics, JobSpec, RetryPolicy, ValidationIssue
 
 ALLOWED_TOP = {"name", "concurrency", "jobs"}
 ALLOWED_JOB = {"id", "source", "depends_on", "retry", "params"}
@@ -48,6 +49,9 @@ def parse_job(
                 job_id,
             )
         )
+        # Keep parsing the remaining fields so every field-level problem is
+        # reported, but the loader will discard this job from the effective
+        # dependency graph.
         source = "/"
     raw_deps = raw.get("depends_on", [])
     deps: list[str] = []
@@ -245,6 +249,31 @@ def valid_source(source: Any) -> bool:
     if "://" in source or "\\" in source or ".." in source:
         return False
     return not any(ord(ch) < 32 or ch.isspace() for ch in source)
+
+
+def build_graph_diagnostics(
+    jobs: dict[str, JobSpec],
+    discarded: list[tuple[str, str]],
+    dangling: list[tuple[str, str, str]],
+    cycle: list[str] | None,
+) -> GraphDiagnostics:
+    """Build diagnostics strictly from the effective (accepted) subgraph.
+
+    ``jobs`` already excludes discarded nodes, so discarded names can only
+    surface through ``dangling`` and are never mistaken for real islands.
+    """
+
+    isolated, dangling_only, edge_less = degree_classes(jobs)
+    return GraphDiagnostics(
+        effective_job_count=len(jobs),
+        components=weakly_connected_components(jobs),
+        isolated_jobs=isolated,
+        discarded_jobs=discarded,
+        dangling_dependencies=dangling,
+        dangling_only_jobs=dangling_only,
+        edge_less_jobs=edge_less,
+        cycle=cycle_summary(jobs, cycle) if cycle else None,
+    )
 
 
 def is_int(value: Any) -> bool:

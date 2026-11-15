@@ -6,7 +6,7 @@ from collections import deque
 from typing import Iterable
 
 from . import config
-from .models import PlanDag
+from .models import JobSpec, PlanDag
 
 
 def topological_layers(dag: PlanDag) -> list[list[str]]:
@@ -112,3 +112,155 @@ def downstream_of(dag: PlanDag, job_ids: Iterable[str]) -> set[str]:
 
 def initial_ready_set(dag: PlanDag) -> list[str]:
     return frontier(dag, completed=frozenset())
+
+
+def _neighbors(jobs: dict[str, JobSpec]) -> dict[str, set[str]]:
+    """Undirected adjacency over dependencies that exist in ``jobs``."""
+
+    adjacency: dict[str, set[str]] = {job_id: set() for job_id in jobs}
+    for job_id in jobs:
+        for dep in jobs[job_id].depends_on:
+            if dep in jobs:
+                adjacency[job_id].add(dep)
+                adjacency[dep].add(job_id)
+    return adjacency
+
+
+def weakly_connected_components(jobs: dict[str, JobSpec]) -> list[list[str]]:
+    """Weakly connected components of the effective dependency graph.
+
+    Only jobs present in ``jobs`` are nodes.  Declared dependencies whose name
+    is absent are ignored: they are not nodes of the effective subgraph.
+    Component members are sorted, and components are ordered by first member
+    for deterministic output.
+    """
+
+    adjacency = _neighbors(jobs)
+    seen: set[str] = set()
+    components: list[list[str]] = []
+    for start in sorted(jobs):
+        if start in seen:
+            continue
+        seen.add(start)
+        queue: deque[str] = deque([start])
+        members: list[str] = []
+        while queue:
+            current = queue.popleft()
+            members.append(current)
+            for neighbor in sorted(adjacency[current]):
+                if neighbor not in seen:
+                    seen.add(neighbor)
+                    queue.append(neighbor)
+        components.append(sorted(members))
+    components.sort(key=lambda component: component[0])
+    return components
+
+
+def _has_dangling_dependency(job: JobSpec, jobs: dict[str, JobSpec]) -> bool:
+    return any(dep not in jobs for dep in job.depends_on)
+
+
+def degree_classes(
+    jobs: dict[str, JobSpec],
+) -> tuple[list[str], list[str], list[str]]:
+    """Classify zero-degree accepted jobs.
+
+    Returns ``(isolated, dangling_only, edge_less)``:
+
+    * ``edge_less`` is every accepted job with no incoming and no outgoing
+      edge in the effective graph.  Only accepted jobs are nodes, so discarded
+      nodes can never appear here.
+    * ``dangling_only`` is the subset of that set whose declared dependencies
+      all point at names absent from the effective graph.  These are reported
+      separately to distinguish them from a genuinely standalone job.
+    * ``isolated`` follows the suspicious-island rule literally: zero in/out
+      degree in the effective graph, and accepted (never discarded).  It
+      equals ``edge_less``; dangling-only jobs remain flagged separately.
+    """
+
+    adjacency = _neighbors(jobs)
+    edge_less = [job_id for job_id in sorted(jobs) if not adjacency[job_id]]
+    dangling_only = [
+        job_id
+        for job_id in edge_less
+        if _has_dangling_dependency(jobs[job_id], jobs)
+    ]
+    return edge_less, dangling_only, edge_less
+
+
+def isolated_jobs(jobs: dict[str, JobSpec]) -> list[str]:
+    """Accepted jobs with no incoming and no outgoing effective edge."""
+
+    return degree_classes(jobs)[0]
+
+
+def cycle_summary(jobs: dict[str, JobSpec], cycle: list[str]) -> dict:
+    """Describe a detected cycle using the effective graph.
+
+    ``cycle`` follows :func:`batchsched.plan_schema.find_cycle` and repeats the
+    first node at the end.  Entry order is the dependency walk order used by
+    cycle detection, so ``order`` starts at ``cycle[0]``.  Degrees are counted
+    over the whole effective graph with edges pointing from a job to each
+    dependency: ``indegree`` is the number of dependencies a job has, and
+    ``outdegree`` is the number of jobs that depend on it.
+    """
+
+    nodes: list[str] = []
+    for job_id in cycle:
+        if job_id not in nodes:
+            nodes.append(job_id)
+    node_set = set(nodes)
+    indegree: dict[str, int] = {}
+    outdegree: dict[str, int] = {}
+    cycle_indegree: dict[str, int] = {}
+    cycle_outdegree: dict[str, int] = {}
+    cycle_dependencies: dict[str, list[str]] = {}
+    for job_id in nodes:
+        spec = jobs.get(job_id)
+        deps = spec.depends_on if spec is not None else ()
+        indegree[job_id] = sum(1 for dep in deps if dep in jobs)
+        cycle_indegree[job_id] = sum(1 for dep in deps if dep in node_set)
+        outdegree[job_id] = sum(
+            1
+            for other in jobs
+            if other != job_id and job_id in jobs[other].depends_on
+        )
+        cycle_outdegree[job_id] = sum(
+            1 for other in nodes if other != job_id and job_id in jobs[other].depends_on
+        )
+        cycle_dependencies[job_id] = [dep for dep in deps if dep in node_set]
+    order = list(cycle)
+    edges = [
+        {"from": order[index], "to": order[index + 1]}
+        for index in range(len(order) - 1)
+    ]
+    return {
+        "order": order,
+        "dependency_order": order,
+        "nodes": nodes,
+        "length": len(nodes),
+        "edges": edges,
+        "dependencies": {
+            job_id: cycle_dependencies[job_id] for job_id in nodes
+        },
+        "jobs": [
+            {
+                "id": job_id,
+                "indegree": indegree[job_id],
+                "outdegree": outdegree[job_id],
+                "in_degree": indegree[job_id],
+                "out_degree": outdegree[job_id],
+                "cycle_indegree": cycle_indegree[job_id],
+                "cycle_outdegree": cycle_outdegree[job_id],
+                "dependencies": cycle_dependencies[job_id],
+            }
+            for job_id in nodes
+        ],
+        "job_degrees": {
+            job_id: {
+                "indegree": indegree[job_id],
+                "outdegree": outdegree[job_id],
+            }
+            for job_id in nodes
+        },
+    }

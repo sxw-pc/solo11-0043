@@ -24,22 +24,123 @@ class ValidationIssue:
         return payload
 
 
+class GraphDiagnostics:
+    """Structural view of the effective dependency graph.
+
+    The effective graph contains only jobs accepted by the loader.  Nodes that
+    were discarded while parsing (invalid ids, invalid sources, jobs beyond the
+    limit) never appear here, even when another job still names them.
+    """
+
+    def __init__(
+        self,
+        *,
+        effective_job_count: int,
+        components: list[list[str]],
+        isolated_jobs: list[str],
+        discarded_jobs: list[tuple[str, str]],
+        dangling_dependencies: list[tuple[str, str, str]],
+        dangling_only_jobs: list[str] | None = None,
+        edge_less_jobs: list[str] | None = None,
+        cycle: dict[str, Any] | None = None,
+    ):
+        self.effective_job_count = effective_job_count
+        self.components = [list(component) for component in components]
+        self.isolated_jobs = list(isolated_jobs)
+        self.discarded_jobs = list(discarded_jobs)
+        self.dangling_dependencies = list(dangling_dependencies)
+        self.dangling_only_jobs = (
+            list(dangling_only_jobs) if dangling_only_jobs is not None else []
+        )
+        self.edge_less_jobs = (
+            list(edge_less_jobs) if edge_less_jobs is not None else list(isolated_jobs)
+        )
+        self.cycle = cycle
+
+    @property
+    def component_count(self) -> int:
+        return len(self.components)
+
+    @property
+    def diagnostics_ok(self) -> bool:
+        """True when the effective graph has no structural finding.
+
+        Cycles, discarded nodes and dangling dependencies are findings.
+        Isolated jobs are advisory ("suspicious"): a legal plan may consist of
+        one standalone job, so islands do not clear this flag.
+        """
+
+        return (
+            self.cycle is None
+            and not self.discarded_jobs
+            and not self.dangling_dependencies
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        cycle_payload = self.cycle
+        discarded_ids = [job_id for job_id, _ in self.discarded_jobs]
+        return {
+            "diagnostics_ok": self.diagnostics_ok,
+            "effective_job_count": self.effective_job_count,
+            "effective_job_ids": sorted(
+                job_id for component in self.components for job_id in component
+            ),
+            "weakly_connected_component_count": self.component_count,
+            "component_count": self.component_count,
+            "weakly_connected_components": [
+                list(component) for component in self.components
+            ],
+            "isolated_jobs": list(self.isolated_jobs),
+            "suspicious_isolated_jobs": list(self.isolated_jobs),
+            "isolated_count": len(self.isolated_jobs),
+            "dangling_only_jobs": list(self.dangling_only_jobs),
+            "edge_less_jobs": list(self.edge_less_jobs),
+            "discarded_jobs": discarded_ids,
+            "discarded_job_ids": discarded_ids,
+            "discarded_job_details": [
+                {"id": job_id, "reason": reason}
+                for job_id, reason in self.discarded_jobs
+            ],
+            "dangling_dependencies": [
+                {"job_id": job_id, "dependency": dep, "reason": reason}
+                for job_id, dep, reason in self.dangling_dependencies
+            ],
+            "has_cycle": cycle_payload is not None,
+            "cycle": cycle_payload,
+            "cycle_summary": cycle_payload,
+            "cycles": [cycle_payload] if cycle_payload is not None else [],
+        }
+
+
 class PlanValidationError(ValueError):
     """Raised when a plan cannot be accepted; carries structured issues."""
 
-    def __init__(self, issues: list[ValidationIssue]):
+    def __init__(
+        self,
+        issues: list[ValidationIssue],
+        graph_diagnostics: GraphDiagnostics | dict[str, Any] | None = None,
+    ):
         self.issues = sorted(
             issues,
             key=lambda item: (item.line is None, item.line or 0, item.code, item.message),
         )
+        if isinstance(graph_diagnostics, GraphDiagnostics):
+            graph_diagnostics = graph_diagnostics.to_dict()
+        self.graph_diagnostics: dict[str, Any] | None = graph_diagnostics
         super().__init__(f"plan validation failed with {len(issues)} issue(s)")
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "ok": False,
             "error_count": len(self.issues),
             "errors": [issue.to_dict() for issue in self.issues],
         }
+        if self.graph_diagnostics is not None:
+            payload["graph_diagnostics"] = self.graph_diagnostics
+            payload["diagnostics_ok"] = bool(
+                self.graph_diagnostics.get("diagnostics_ok", False)
+            )
+        return payload
 
 
 @dataclass(frozen=True)
