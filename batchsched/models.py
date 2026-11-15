@@ -147,6 +147,19 @@ class JobResult:
 
 
 @dataclass(frozen=True)
+class ArtifactRevision:
+    """One superseded output version of a job inside the same run."""
+
+    run_id: str
+    job_id: str
+    revision_no: int
+    old_sha256: str
+    new_sha256: str
+    backup_path: str
+    at: str | None = None
+
+
+@dataclass(frozen=True)
 class ExecutionOutcome:
     job_id: str
     status: str

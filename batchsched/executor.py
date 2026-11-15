@@ -6,12 +6,19 @@ from dataclasses import replace
 from pathlib import Path
 import hashlib
 import time
+import uuid
 from typing import Callable
 
 from . import config
 from .fetcher import FetchError, Fetcher
 from .ledger import Ledger
-from .models import AttemptRecord, ExecutionOutcome, JobResult, JobSpec
+from .models import (
+    ArtifactRevision,
+    AttemptRecord,
+    ExecutionOutcome,
+    JobResult,
+    JobSpec,
+)
 from .retry import next_backoff_ms
 
 SleepFn = Callable[[float], None]
@@ -48,6 +55,7 @@ class JobExecutor:
                 ),
             )
         attempt_no = self.ledger.next_attempt_no(self.run_id, job.id)
+        self.ledger.save_job_dependencies(self.run_id, job.id, job.depends_on)
         total_backoff_ms = 0
         while True:
             started_at = config.utc_now_iso()
@@ -57,9 +65,8 @@ class JobExecutor:
             try:
                 response = self.fetcher.fetch(job.source)
                 self._check_preconditions(job, response.content, response.content_type)
-                digest = hashlib.sha256(response.content).hexdigest()
-                size_bytes = len(response.content)
-                self._write_output(job.id, response.content, digest)
+                target, digest = self._write_output(job.id, response.content)
+                size_bytes = target.stat().st_size
                 ledger_path = config.run_output_relative(self.run_id, f"{job.id}.raw")
                 self.ledger.record_attempt(
                     AttemptRecord(
@@ -159,21 +166,110 @@ class JobExecutor:
                     f"body shorter than min_bytes ({len(content)} < {min_bytes})",
                 )
 
-    def _write_output(self, job_id: str, content: bytes, digest: str) -> Path:
+    def _write_output(self, job_id: str, content: bytes) -> tuple[Path, str]:
+        """Persist bytes and return ``(target, digest_of_final_artifact)``.
+
+        Versioning rules:
+
+        * ``job_results.sha256`` is the only baseline.  Whenever a completed
+          artifact already exists, it is renamed to a sibling ``.bak`` file
+          *before* the new content atomically replaces it (rename on one
+          filesystem), so the old bytes are never lost.
+        * The new digest is read back from the final ``.raw`` artifact after
+          the ``replace``.  That post-replace digest alone decides whether a
+          revision row is written; the staging ``.tmp`` digest is never used
+          for the decision.
+        * Identical bytes leave neither a backup nor a revision row.
+        """
+
         target = self.output_dir / f"{job_id}.raw"
-        temporary = self.output_dir / f".{job_id}.{digest[:8]}.tmp"
+        temporary = self.output_dir / f".{job_id}.{uuid.uuid4().hex[:8]}.tmp"
+        prior = self.ledger.get_job_result(self.run_id, job_id)
+        prior_digest = (
+            prior.sha256
+            if prior is not None and prior.status == config.JOB_DONE
+            else None
+        )
+        backup: Path | None = None
         try:
             temporary.write_bytes(content)
+            if prior_digest is not None and target.exists():
+                # The old final artifact is fully preserved before the new
+                # content replaces it; both renames are atomic on one
+                # filesystem, so a crash cannot lose the prior bytes.
+                backup = self._backup_path(job_id, prior_digest)
+                target.replace(backup)
             temporary.replace(target)
         except OSError as exc:
             try:
                 temporary.unlink(missing_ok=True)
             except OSError:
                 pass
+            if backup is not None and backup.exists() and not target.exists():
+                try:
+                    backup.replace(target)
+                except OSError:
+                    pass
             raise FetchError(
                 "parse_precondition", f"output write failed: {exc.__class__.__name__}"
             ) from exc
-        return target
+
+        try:
+            final_digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise FetchError(
+                "parse_precondition",
+                f"output verify failed: {exc.__class__.__name__}",
+            ) from exc
+
+        if backup is not None:
+            if final_digest != prior_digest:
+                self._record_revision(job_id, prior_digest, final_digest, backup)
+            else:
+                # The final artifact equals the recorded version: no version
+                # was created, so the safety copy is removed again.
+                try:
+                    backup.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        return target, final_digest
+
+    def _backup_path(self, job_id: str, old_digest: str) -> Path:
+        candidate = self.output_dir / f"{job_id}.{old_digest[:8]}.raw.bak"
+        suffix = 1
+        while candidate.exists():
+            candidate = (
+                self.output_dir / f"{job_id}.{old_digest[:8]}.{suffix}.raw.bak"
+            )
+            suffix += 1
+        return candidate
+
+    def _record_revision(
+        self,
+        job_id: str,
+        old_digest: str,
+        new_digest: str,
+        backup: Path,
+    ) -> None:
+        revision_no = self.ledger.next_revision_no(self.run_id, job_id)
+        backup_relative = config.run_output_relative(self.run_id, backup.name)
+        self.ledger.save_artifact_revision(
+            ArtifactRevision(
+                run_id=self.run_id,
+                job_id=job_id,
+                revision_no=revision_no,
+                old_sha256=old_digest,
+                new_sha256=new_digest,
+                backup_path=backup_relative,
+            )
+        )
+        self.ledger.add_audit(
+            self.run_id,
+            "output_revised",
+            f"job={job_id} revision={revision_no}"
+            f" old_sha256={old_digest} new_sha256={new_digest}"
+            f" backup={backup_relative}",
+        )
 
     def _record_failure(self, job_id: str, reason: str) -> None:
         self.ledger.save_job_result(

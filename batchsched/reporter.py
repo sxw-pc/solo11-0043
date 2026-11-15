@@ -33,6 +33,8 @@ def build_report(
     }
     for result in results:
         counts[result["status"]] = counts.get(result["status"], 0) + 1
+    revisions = _artifact_revisions(ledger, run_id, base)
+    revised_jobs = {item["job_id"] for item in revisions}
     failure_counts: Counter[str] = Counter(
         str(item["error_class"]) for item in attempts if item["error_class"]
     )
@@ -67,8 +69,13 @@ def build_report(
                 ),
                 "reason": _safe_text(result.get("reason"), base),
                 "attempts": job_attempts,
+                "revised": result["job_id"] in revised_jobs,
             }
         )
+    dependencies = ledger.get_job_dependencies(run_id)
+    revised_jobs_report = _revised_job_entries(
+        revisions, dependencies, set(revised_jobs)
+    )
     return {
         "schema_version": 1,
         "run": {
@@ -90,6 +97,12 @@ def build_report(
         "failure_class_counts": dict(sorted(failure_counts.items())),
         "outputs": outputs,
         "jobs": jobs,
+        "revised_jobs": revised_jobs_report,
+        "recording": {
+            "strategy": "atomic_replace_with_backup",
+            "compare_basis": "job_results.sha256",
+            "backup_pattern": "<job_id>.<old_sha8>.raw.bak",
+        },
         "resume_history": [
             {
                 "detail": _safe_text(item.get("detail"), base),
@@ -100,6 +113,96 @@ def build_report(
         ],
         "audit_summary": dict(sorted(audit_counts.items())),
     }
+
+
+def _artifact_revisions(
+    ledger: Ledger, run_id: str, base: Path
+) -> list[dict[str, Any]]:
+    revisions = []
+    for revision in ledger.get_artifact_revisions(run_id):
+        revisions.append(
+            {
+                "job_id": revision.job_id,
+                "revision_no": revision.revision_no,
+                "old_sha256": revision.old_sha256,
+                "new_sha256": revision.new_sha256,
+                "backup_path": _relative_path(
+                    revision.backup_path, base, run_id
+                ),
+                "at": revision.at,
+            }
+        )
+    return revisions
+
+
+def _revised_job_entries(
+    revisions: list[dict[str, Any]],
+    dependencies: dict[str, list[str]],
+    revised_jobs: set[str],
+) -> list[dict[str, Any]]:
+    """One entry per revised job: version chain plus upstream annotation.
+
+    Versions are the job's own artifact history, ending with the digest that
+    ``job_results`` currently points at.  ``upstream_revisioned`` is true when
+    any transitive dependency was itself revised during this run.
+    """
+
+    # Traverse every recorded edge, not just revised nodes, so a revised
+    # ancestor hidden behind an unrevised intermediate is still found.
+    by_job: dict[str, list[dict[str, Any]]] = {}
+    for revision in revisions:
+        by_job.setdefault(revision["job_id"], []).append(revision)
+    entries: list[dict[str, Any]] = []
+    for job_id in sorted(by_job):
+        chain = by_job[job_id]
+        versions = [
+            {
+                "revision_no": revision["revision_no"],
+                "sha256": revision["old_sha256"],
+                "backup_path": revision["backup_path"],
+                "at": revision["at"],
+            }
+            for revision in chain
+        ]
+        # The live artifact has no backup; ``job_results`` holds its digest.
+        versions.append(
+            {
+                "revision_no": chain[-1]["revision_no"] + 1,
+                "sha256": chain[-1]["new_sha256"],
+                "backup_path": None,
+                "at": None,
+            }
+        )
+        upstream_revisioned = _has_revised_upstream(
+            job_id, dependencies, revised_jobs
+        )
+        entries.append(
+            {
+                "job_id": job_id,
+                "revision_count": len(chain),
+                "versions": versions,
+                "upstream_revisioned": upstream_revisioned,
+            }
+        )
+    return entries
+
+
+def _has_revised_upstream(
+    job_id: str,
+    parents: dict[str, list[str]],
+    revised_jobs: set[str],
+) -> bool:
+    seen: set[str] = set()
+    stack = list(parents.get(job_id, []))
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        if current in revised_jobs:
+            return True
+        stack.extend(parents.get(current, []))
+    return False
 
 
 def to_json(report: dict[str, Any]) -> str:
@@ -176,6 +279,42 @@ def to_markdown(report: dict[str, Any]) -> str:
         lines.extend(f"- `{path}`" for path in report["outputs"])
     else:
         lines.append("No output files.")
+    lines.extend(["", "## Artifact revisions", ""])
+    revised = report["revised_jobs"]
+    if not revised:
+        lines.append("No artifacts were revised in this run.")
+    else:
+        lines.append(
+            "Each listed job was successfully written more than once in this"
+            " run; prior bytes remain available as `.bak` files."
+        )
+        lines.append("")
+        for entry in revised:
+            upstream = (
+                "upstream artifact revised in this run"
+                if entry["upstream_revisioned"]
+                else "no upstream artifact revised"
+            )
+            lines.append(
+                f"### `{entry['job_id']}` — {entry['revision_count']} revision(s)"
+                f", {upstream}"
+            )
+            lines.append("")
+            lines.append("| Version | SHA-256 (12) | Backup path |")
+            lines.append("| ---: | --- | --- |")
+            for version in entry["versions"]:
+                lines.append(
+                    "| {n} | `{sha}` | {backup} |".format(
+                        n=version["revision_no"],
+                        sha=version["sha256"][:12],
+                        backup=(
+                            f"`{version['backup_path']}`"
+                            if version["backup_path"]
+                            else "-"
+                        ),
+                    )
+                )
+            lines.append("")
     lines.extend(["", "## Resume history", ""])
     if report["resume_history"]:
         for event in report["resume_history"]:

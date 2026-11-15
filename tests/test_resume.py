@@ -188,3 +188,94 @@ def test_resume_state_counts(ledger):
     assert state.skipped == ()
     assert state.pending == ("fetch_c",)
     assert state.summary()["pending"] == 1
+
+
+class _ScriptedFetcher:
+    """Serves each source a distinct body per call; no network is touched."""
+
+    def __init__(self, bodies_by_source: dict[str, list[bytes]]):
+        self.bodies_by_source = {
+            source: list(bodies) for source, bodies in bodies_by_source.items()
+        }
+        self.calls: dict[str, int] = {}
+
+    def fetch(self, source: str):
+        from batchsched.fetcher import FetchResponse
+
+        index = self.calls.get(source, 0)
+        bodies = self.bodies_by_source[source]
+        self.calls[source] = index + 1
+        return FetchResponse(
+            content=bodies[min(index, len(bodies) - 1)],
+            status_code=200,
+            content_type="application/json; charset=utf-8",
+            elapsed_ms=1,
+            url=source,
+        )
+
+
+def _scripted_executor(ledger, run_id, output_root, bodies_by_source):
+    return JobExecutor(
+        _ScriptedFetcher(bodies_by_source),
+        ledger,
+        run_id,
+        output_root / run_id,
+    )
+
+
+def test_resume_does_not_rewrite_done_artifact_even_if_source_changes(
+    ledger, tmp_path
+):
+    """Done jobs stay untouched on resume: no re-execution, no backup,
+    no revision row and byte-identical output.
+    """
+
+    run_id = "run-resume-no-rewrite"
+    ledger.create_run(run_id, "plans/resume.yaml", config.utc_now_iso())
+    plan = parse_plan_text(PLAN_TEXT)
+    output_root = tmp_path / "out"
+
+    # Only fetch_a has landed; fetch_b and fetch_c are still pending.
+    first = _scripted_executor(
+        ledger,
+        run_id,
+        output_root,
+        {"/api/catalog": [b"a-original"]},
+    )
+    a_outcome = first.execute(plan.jobs["fetch_a"])
+    assert a_outcome.status == config.JOB_DONE
+    raw_a = output_root / run_id / "fetch_a.raw"
+    before_bytes = raw_a.read_bytes()
+    before_result = ledger.get_job_result(run_id, "fetch_a")
+    assert before_result is not None and before_result.sha256 == a_outcome.sha256
+
+    # The upstream source would now serve different bytes, but fetch_a is done.
+    resumed_executor = _scripted_executor(
+        ledger,
+        run_id,
+        output_root,
+        {
+            "/api/catalog": [b"a-CHANGED"],
+            "/api/orders": [b"b-recovered"],
+            "/api/summary": [b"c-recovered"],
+        },
+    )
+    outcome = resume_run(ledger, plan, run_id, resumed_executor)
+    assert outcome.status == config.RUN_COMPLETED
+
+    # fetch_a was not executed again despite its changed source.
+    assert "/api/catalog" not in resumed_executor.fetcher.calls
+    assert raw_a.read_bytes() == before_bytes
+    after_result = ledger.get_job_result(run_id, "fetch_a")
+    assert after_result is not None
+    assert after_result.sha256 == before_result.sha256
+    assert ledger.get_artifact_revisions(run_id, "fetch_a") == []
+    assert not list((output_root / run_id).glob("fetch_a.*.raw.bak"))
+    assert not [
+        item for item in ledger.get_audit(run_id)
+        if item["event"] == "output_revised"
+    ]
+
+    # The pending jobs did land normally.
+    assert (output_root / run_id / "fetch_b.raw").read_bytes() == b"b-recovered"
+    assert (output_root / run_id / "fetch_c.raw").read_bytes() == b"c-recovered"

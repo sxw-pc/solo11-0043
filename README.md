@@ -136,12 +136,27 @@ python -m batchsched resume --run <run_id>
 | `runs` | `run_id`, `plan_path`, `started_at`, `finished_at`, `status`, `summary_json` | 一次调度 run |
 | `attempts` | `run_id`, `job_id`, `attempt_no`, `error_class`, `duration_ms`, `backoff_ms`, `started_at` | 每次尝试；主键阻止重复序号 |
 | `job_results` | `run_id`, `job_id`, `status`, `sha256`, `size_bytes`, `output_path`, `reason` | 每个作业的终态；主键保证唯一 |
+| `artifact_revisions` | `run_id`, `job_id`, `revision_no`, `old_sha256`, `new_sha256`, `backup_path`, `at` | 同一 run 内作业产物被替换时的历史版本 |
+| `job_dependencies` | `run_id`, `job_id`, `depends_on` | 执行器记录的依赖边，供报告标注上游修订 |
 | `audit` | `run_id`, `event`, `detail`, `at` | 拒绝、重试、续跑、完成等事件 |
+
+## 产物版本追踪
+
+同一 run 内作业可能因重试或再次成功落盘而覆盖 `work/output/runs/<run_id>/<job_id>.raw`。为避免旧产物无声消失：
+
+1. 写入顺序固定为「写 staging 临时文件 → `rename` 旧最终产物到备份 → `rename` 临时文件到最终路径」。两次 `rename` 在同一文件系统内均为原子操作，因此旧 `.raw` 在新内容替换前已完整保留。
+2. 版本判定只使用 `replace` 生效后的最终 `.raw` 摘要，与 `job_results.sha256` 比较；`.tmp` 临时文件摘要不参与判定。
+3. 新摘要与旧摘要不同时：旧产物备份为 `<job_id>.<old_sha8>.raw.bak`（同名冲突时追加序号），并向 `artifact_revisions` 追加一行 `old_sha256` / `new_sha256` / `backup_path`，同时写 `output_revised` 审计。
+4. 新摘要与旧摘要一致时：不生成备份、不写版本行，临时文件删除。
+5. `job_results` 仍只保留一条记录，`sha256` 始终指向最终生效的 `.raw`。
+6. `resume` 不重执行已 `done` 的作业，因此其产物不会被覆盖或产生新的版本记录。
+
+报告会列出本次 run 中产物被修订过的作业，按版本先后给出各版摘要与备份相对路径（当前生效版本没有备份路径），并标注该作业在本次 run 内是否存在被修订过的上游（含间接上游）。
 
 ## 报告
 
-- JSON 汇报：run 状态、done/failed/skipped 计数、总 attempt 数、累计 attempt 耗时、失败分类计数、输出文件列表、作业与 attempt 明细。
-- Markdown 复盘：按状态分组的作业表、失败作业的错误分类与 attempt 明细、续跑历史、审计事件摘要。
+- JSON 汇报：run 状态、done/failed/skipped 计数、总 attempt 数、累计 attempt 耗时、失败分类计数、输出文件列表、作业与 attempt 明细、产物修订版本链。
+- Markdown 复盘：按状态分组的作业表、失败作业的错误分类与 attempt 明细、产物修订版本表（含旧摘要与备份相对路径、上游修订标注）、续跑历史、审计事件摘要。
 - 报告中的路径都转换为相对路径（典型为 `work/output/runs/<run_id>/...`），计划路径若是绝对路径会折叠为文件名或相对路径。
 - 报告对固定台账内容可按相同顺序复现；唯一变化来源是 run 自身记录的时间和耗时。
 
@@ -160,13 +175,14 @@ python -m batchsched resume --run <run_id>
 pytest -q
 ```
 
-当前共有 **79 个测试项**，覆盖：
+当前共有 **91 个测试项**，覆盖：
 
 - 计划校验：重复 id、悬空依赖、自依赖、环、未知字段、非法 retry、作业上限、YAML 语法与行号。
 - DAG：拓扑分层、执行前沿、失败/skipped 传导、下游计算。
 - 调度：并发峰值、显式并发上限、失败跳过、已有 done 不重跑、中断、worker 异常隔离。
 - 抓取与执行：白名单拒绝且零 HTTP 调用、500/404/超时/空 body/超大响应分类、固定/指数退避、4xx 不重试、退避上限、输出 SHA-256。
-- 台账与续跑：唯一约束、attempt 序号、resume 不重复 job_result、中断后 SHA-256 与完整执行一致、`resumed` 审计。
+- 台账与续跑：唯一约束、attempt 序号、resume 不重复 job_result、中断后 SHA-256 与完整执行一致、`resumed` 审计、resume 不重写已 done 作业的产物。
+- 产物版本：重试内容变化生成备份与版本行、内容不变不产生版本、多版本摘要链、备份路径含旧摘要、`output_revised` 审计、报告按版本列出并标注上游修订。
 - API 与报告：只读端点、非回环拒绝、JSON/Markdown 结构、报告无绝对路径。
 - CLI：计划退出码、run/report 闭环。
 
@@ -198,6 +214,7 @@ batchsched/
   executor.py          单作业抓取、落盘、重试
   fetcher.py           白名单 + 本机 HTTP 抓取
   ledger.py            SQLite 台账（唯一 SQL 层）
+  artifact_store.py    产物版本表与依赖边的持久化（台账 mixin）
   retry.py             退避算术与上限
   resume.py            断点续跑
   reporter.py          JSON / Markdown 报告

@@ -1,4 +1,5 @@
-"""SQLite execution ledger.  Every SQL statement in the project lives here."""
+"""SQLite execution ledger.  Every SQL statement in the project lives in the
+ledger layer (this module plus :mod:`batchsched.artifact_store`)."""
 
 from __future__ import annotations
 
@@ -9,6 +10,7 @@ import sqlite3
 from typing import Any, Iterator
 
 from . import config
+from .artifact_store import ARTIFACT_SCHEMA, ArtifactLedgerMixin
 from .models import AttemptRecord, JobResult
 
 _SCHEMA = """
@@ -52,7 +54,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_run ON audit(run_id, id);
 """
 
 
-class Ledger:
+class Ledger(ArtifactLedgerMixin):
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -79,6 +81,7 @@ class Ledger:
         with self._connection() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.executescript(_SCHEMA)
+            connection.executescript(ARTIFACT_SCHEMA)
 
     def create_run(
         self,

@@ -6,7 +6,11 @@ import pytest
 
 from batchsched import config
 from batchsched.ledger import Ledger
-from batchsched.models import AttemptRecord, JobResult
+from batchsched.models import (
+    ArtifactRevision,
+    AttemptRecord,
+    JobResult,
+)
 
 
 def _attempt(run_id: str, attempt_no: int = 1, error_class: str | None = None):
@@ -32,7 +36,14 @@ def test_schema_tables_and_primary_keys(tmp_path):
         }
         attempt_pk = connection.execute("PRAGMA table_info(attempts)").fetchall()
         result_pk = connection.execute("PRAGMA table_info(job_results)").fetchall()
-    assert {"runs", "attempts", "job_results", "audit"} <= names
+    assert {
+        "runs",
+        "attempts",
+        "job_results",
+        "audit",
+        "artifact_revisions",
+        "job_dependencies",
+    } <= names
     assert [row[1] for row in attempt_pk if row[5]] == [
         "run_id",
         "job_id",
@@ -135,3 +146,44 @@ def test_run_details_aggregate(ledger, active_run):
     assert details["total_attempts"] == 1
     assert len(details["jobs"]) == 2
     assert ledger.get_run_details("missing") is None
+
+
+def test_artifact_revision_rows_are_append_only(ledger, active_run):
+    revision = ArtifactRevision(
+        run_id=active_run,
+        job_id="job_one",
+        revision_no=1,
+        old_sha256="a" * 64,
+        new_sha256="b" * 64,
+        backup_path=f"work/output/runs/{active_run}/job_one.{'a' * 8}.raw.bak",
+        at="2026-01-01T00:00:00Z",
+    )
+    ledger.save_artifact_revision(revision)
+    ledger.save_artifact_revision(
+        ArtifactRevision(
+            run_id=active_run,
+            job_id="job_one",
+            revision_no=2,
+            old_sha256="b" * 64,
+            new_sha256="c" * 64,
+            backup_path=f"work/output/runs/{active_run}/job_one.{'b' * 8}.raw.bak",
+            at="2026-01-01T00:00:01Z",
+        )
+    )
+    rows = ledger.get_artifact_revisions(active_run)
+    assert [item.revision_no for item in rows] == [1, 2]
+    assert rows[0].old_sha256 == "a" * 64
+    assert rows[1].backup_path.endswith("job_one.bbbbbbbb.raw.bak")
+    assert ledger.next_revision_no(active_run, "job_one") == 3
+    assert ledger.next_revision_no(active_run, "job_other") == 1
+    # The revision table does not disturb the single job_results row.
+    assert ledger.get_job_results(active_run) == []
+
+
+def test_job_dependencies_roundtrip(ledger, active_run):
+    ledger.save_job_dependencies(active_run, "job_b", ["job_a"])
+    ledger.save_job_dependencies(active_run, "job_c", ["job_a", "job_b"])
+    assert ledger.get_job_dependencies(active_run) == {
+        "job_b": ["job_a"],
+        "job_c": ["job_a", "job_b"],
+    }
