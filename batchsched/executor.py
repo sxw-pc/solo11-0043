@@ -5,13 +5,21 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 import hashlib
+import json
 import time
 from typing import Callable
 
 from . import config
 from .fetcher import FetchError, Fetcher
 from .ledger import Ledger
-from .models import AttemptRecord, ExecutionOutcome, JobResult, JobSpec
+from .models import (
+    AttemptRecord,
+    ExecutionOutcome,
+    JobResult,
+    JobSpec,
+    artifact_record_count,
+    contract_param_errors,
+)
 from .retry import next_backoff_ms
 
 SleepFn = Callable[[float], None]
@@ -48,6 +56,9 @@ class JobExecutor:
                 ),
             )
         attempt_no = self.ledger.next_attempt_no(self.run_id, job.id)
+        contract_failures = self._check_upstream_contracts(job)
+        if contract_failures:
+            return self._record_contract_failure(job, attempt_no, contract_failures)
         total_backoff_ms = 0
         while True:
             started_at = config.utc_now_iso()
@@ -158,6 +169,95 @@ class JobExecutor:
                     "parse_precondition",
                     f"body shorter than min_bytes ({len(content)} < {min_bytes})",
                 )
+
+    def _check_upstream_contracts(self, job: JobSpec) -> list[str]:
+        """Validate every direct upstream's persisted artifact against the
+        contract declared in ``job.params``.  All upstreams are checked and
+        every violation aggregated; empty result means the job may fetch."""
+
+        required_fields = job.params.get("required_fields")
+        min_records = job.params.get("min_records")
+        if required_fields is None and min_records is None:
+            return []
+        declaration_errors = contract_param_errors(job.params)
+        if declaration_errors:
+            return declaration_errors
+        failures: list[str] = []
+        for dep in sorted(job.depends_on):
+            failures.extend(
+                self._validate_upstream_artifact(dep, required_fields, min_records)
+            )
+        return failures
+
+    def _validate_upstream_artifact(
+        self,
+        dep: str,
+        required_fields: list[str] | None,
+        min_records: int | None,
+    ) -> list[str]:
+        prefix = f"upstream '{dep}'"
+        path = self.output_dir / f"{dep}.raw"
+        if not path.is_file():
+            return [f"{prefix}: artifact missing ({path.name})"]
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return [f"{prefix}: artifact unreadable"]
+        if not raw.strip():
+            return [f"{prefix}: artifact is empty"]
+        try:
+            document = json.loads(raw)
+        except json.JSONDecodeError:
+            return [f"{prefix}: artifact is not valid JSON"]
+        failures: list[str] = []
+        if required_fields:
+            if not isinstance(document, dict):
+                failures.append(f"{prefix}: artifact is not a JSON object")
+            else:
+                missing = [name for name in required_fields if name not in document]
+                if missing:
+                    failures.append(
+                        f"{prefix}: missing required field(s): {', '.join(missing)}"
+                    )
+        if min_records is not None:
+            records = artifact_record_count(document)
+            if records < min_records:
+                failures.append(
+                    f"{prefix}: record count {records} below min_records {min_records}"
+                )
+        return failures
+
+    def _record_contract_failure(
+        self, job: JobSpec, attempt_no: int, failures: list[str]
+    ) -> ExecutionOutcome:
+        """Persist the parse_precondition evidence exactly once; no retry."""
+
+        self.ledger.record_attempt(
+            AttemptRecord(
+                run_id=self.run_id,
+                job_id=job.id,
+                attempt_no=attempt_no,
+                error_class="parse_precondition",
+                duration_ms=0,
+                backoff_ms=0,
+                started_at=config.utc_now_iso(),
+            )
+        )
+        detail = _safe_detail("; ".join(failures))
+        reason = f"parse_precondition: upstream artifact contract: {detail}"
+        self._record_failure(job.id, reason)
+        self.ledger.add_audit(
+            self.run_id,
+            "upstream_contract_blocked",
+            f"job={job.id} upstreams={len(job.depends_on)} failures={len(failures)}",
+        )
+        return ExecutionOutcome(
+            job_id=job.id,
+            status=config.JOB_FAILED,
+            reason=reason,
+            error_class="parse_precondition",
+            attempts=attempt_no,
+        )
 
     def _write_output(self, job_id: str, content: bytes, digest: str) -> Path:
         target = self.output_dir / f"{job_id}.raw"

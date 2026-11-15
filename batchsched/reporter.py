@@ -37,6 +37,7 @@ def build_report(
         str(item["error_class"]) for item in attempts if item["error_class"]
     )
     audit_counts = Counter(str(item["event"]) for item in details["audit"])
+    contract_blocked = audit_counts.get("upstream_contract_blocked", 0)
     total_duration_ms = sum(int(item["duration_ms"]) for item in attempts)
     outputs = sorted(
         _relative_path(result["output_path"], base, run_id)
@@ -88,6 +89,7 @@ def build_report(
         "total_duration_ms": total_duration_ms,
         "total_attempt_duration_ms": total_duration_ms,
         "failure_class_counts": dict(sorted(failure_counts.items())),
+        "upstream_contract_blocked": contract_blocked,
         "outputs": outputs,
         "jobs": jobs,
         "resume_history": [
@@ -123,6 +125,7 @@ def to_markdown(report: dict[str, Any]) -> str:
         f"- Total attempts: {report['total_attempts']}",
         f"- Total attempt duration: {report['total_attempt_duration_ms']} ms",
         f"- Failure classes: {_inline_classes(report['failure_class_counts'])}",
+        f"- Upstream contract blocked: {report['upstream_contract_blocked']}",
         "",
         "## Jobs by status",
         "",

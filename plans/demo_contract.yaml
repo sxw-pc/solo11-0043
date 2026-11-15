@@ -1,0 +1,44 @@
+# Offline demonstration of the upstream artifact contract.  The final job
+# declares required_fields/min_records in its params: before it issues any
+# HTTP request, every direct upstream's persisted artifact is validated
+# against that contract.  A violating upstream blocks the fetch with a
+# non-retried parse_precondition failure instead of a meaningless SHA.
+name: demo-upstream-contract
+concurrency: 3
+jobs:
+  - id: fetch_catalog
+    source: /api/catalog
+    depends_on: []
+    retry:
+      mode: exponential
+      max_attempts: 3
+      base_delay_ms: 50
+
+  - id: fetch_orders
+    source: /api/orders
+    depends_on: [fetch_catalog]
+    retry:
+      mode: fixed
+      max_attempts: 2
+      base_delay_ms: 100
+
+  - id: enrich_orders
+    source: /api/orders/enriched
+    depends_on: [fetch_orders]
+    retry:
+      mode: fixed
+      max_attempts: 2
+      base_delay_ms: 100
+
+  - id: summarize
+    source: /api/summary
+    depends_on: [fetch_catalog, fetch_orders, enrich_orders]
+    retry:
+      mode: fixed
+      max_attempts: 1
+      base_delay_ms: 50
+    params:
+      expect_content_type: application/json
+      min_bytes: 10
+      required_fields: [dataset]
+      min_records: 3

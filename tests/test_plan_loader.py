@@ -219,3 +219,61 @@ jobs:
     with pytest.raises(PlanValidationError) as caught:
         parse_plan_text(text)
     assert any(issue.code == "duplicate_key" for issue in caught.value.issues)
+
+
+def test_demo_contract_plan_loads():
+    plan = load_plan(ROOT / "plans" / "demo_contract.yaml")
+    summarize = plan.job("summarize")
+    assert summarize.depends_on == ("fetch_catalog", "fetch_orders", "enrich_orders")
+    assert summarize.params["required_fields"] == ["dataset"]
+    assert summarize.params["min_records"] == 3
+
+
+def test_upstream_contract_required_fields_validated():
+    text = """
+jobs:
+  - id: fetch_seed
+    source: /api/catalog
+  - id: aggregate
+    source: /api/summary
+    depends_on: [fetch_seed]
+    params: {required_fields: dataset}
+"""
+    with pytest.raises(PlanValidationError) as caught:
+        parse_plan_text(text)
+    assert [issue.code for issue in caught.value.issues] == ["invalid_params"]
+    assert "required_fields" in caught.value.issues[0].message
+
+
+def test_upstream_contract_min_records_validated():
+    for bad in ("-1", "true", "'3'"):
+        text = f"""
+jobs:
+  - id: fetch_seed
+    source: /api/catalog
+  - id: aggregate
+    source: /api/summary
+    depends_on: [fetch_seed]
+    params: {{min_records: {bad}}}
+"""
+        with pytest.raises(PlanValidationError) as caught:
+            parse_plan_text(text)
+        assert any(issue.code == "invalid_params" for issue in caught.value.issues)
+
+
+def test_upstream_contract_valid_declaration_loads():
+    plan = parse_plan_text(
+        """
+jobs:
+  - id: fetch_seed
+    source: /api/catalog
+  - id: aggregate
+    source: /api/summary
+    depends_on: [fetch_seed]
+    params: {required_fields: [dataset, rows], min_records: 0}
+"""
+    )
+    assert plan.job("aggregate").params == {
+        "required_fields": ["dataset", "rows"],
+        "min_records": 0,
+    }

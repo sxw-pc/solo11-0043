@@ -98,6 +98,7 @@ def test_json_summary_structure(ledger, tmp_path):
     }
     assert report["total_attempts"] == 3
     assert report["failure_class_counts"] == {"http_5xx": 2}
+    assert report["upstream_contract_blocked"] == 0
     assert report["outputs"] == [
         f"work/output/runs/{run_id}/fetch_done.raw"
     ]
@@ -144,3 +145,41 @@ def test_report_is_deterministic(ledger, tmp_path):
 def test_missing_report_raises_key_error(ledger):
     with pytest.raises(KeyError):
         build_report(ledger, "run-not-found")
+
+
+def test_upstream_contract_blocked_is_observable(ledger, tmp_path):
+    run_id = "run-report-contract"
+    ledger.create_run(run_id, "plans/contract.yaml", "2026-01-01T00:00:00Z")
+    ledger.finish_run(run_id, config.RUN_FAILED, "2026-01-01T00:00:02Z", {})
+    ledger.save_job_result(
+        JobResult(
+            run_id=run_id,
+            job_id="aggregate",
+            status=config.JOB_FAILED,
+            reason="parse_precondition: upstream artifact contract: "
+            "upstream 'fetch_seed': record count 1 below min_records 5",
+        )
+    )
+    ledger.record_attempt(
+        AttemptRecord(
+            run_id=run_id,
+            job_id="aggregate",
+            attempt_no=1,
+            error_class="parse_precondition",
+            duration_ms=0,
+            backoff_ms=0,
+            started_at="2026-01-01T00:00:01Z",
+        )
+    )
+    ledger.add_audit(
+        run_id,
+        "upstream_contract_blocked",
+        "job=aggregate upstreams=1 failures=1",
+        "2026-01-01T00:00:01Z",
+    )
+    report = build_report(ledger, run_id)
+    assert report["upstream_contract_blocked"] == 1
+    assert report["failure_class_counts"] == {"parse_precondition": 1}
+    markdown = to_markdown(report)
+    assert "Upstream contract blocked: 1" in markdown
+    assert "upstream artifact contract" in markdown

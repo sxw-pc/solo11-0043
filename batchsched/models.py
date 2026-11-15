@@ -203,4 +203,46 @@ def terminal_states(
     }
 
 
+def contract_param_errors(params: dict[str, Any]) -> list[str]:
+    """Declaration errors for the upstream artifact contract params.
+
+    A downstream job may declare ``required_fields`` (list of non-empty
+    field names) and ``min_records`` (non-negative integer) in its params;
+    both are optional.  The same rule backs plan validation (load time)
+    and the executor's fail-closed check (run time).
+    """
+
+    errors: list[str] = []
+    required = params.get("required_fields")
+    if required is not None and (
+        not isinstance(required, list)
+        or any(not isinstance(item, str) or not item.strip() for item in required)
+    ):
+        errors.append(
+            "params.required_fields must be a list of non-empty field names"
+        )
+    min_records = params.get("min_records")
+    if min_records is not None and (
+        not isinstance(min_records, int)
+        or isinstance(min_records, bool)
+        or min_records < 0
+    ):
+        errors.append("params.min_records must be a non-negative integer")
+    return errors
+
+
+def artifact_record_count(document: Any) -> int:
+    """Record count of an artifact document: list length, or the longest
+    top-level list of a JSON object (0 for anything else)."""
+
+    if isinstance(document, list):
+        return len(document)
+    if isinstance(document, dict):
+        return max(
+            (len(value) for value in document.values() if isinstance(value, list)),
+            default=0,
+        )
+    return 0
+
+
 Attempt = AttemptRecord

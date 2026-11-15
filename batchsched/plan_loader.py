@@ -6,7 +6,13 @@ from pathlib import Path
 import yaml
 
 from . import config
-from .models import JobSpec, PlanDag, PlanValidationError, ValidationIssue
+from .models import (
+    JobSpec,
+    PlanDag,
+    PlanValidationError,
+    ValidationIssue,
+    contract_param_errors,
+)
 from .plan_schema import (
     ALLOWED_JOB,
     ALLOWED_TOP,
@@ -124,6 +130,12 @@ def parse_plan_text(text: str, display_name: str = "<inline>") -> PlanDag:
         job = parse_job(raw_job, line, fields, issues)
         if job is None:
             continue
+        for message in contract_param_errors(job.params):
+            issues.append(
+                ValidationIssue(
+                    "invalid_params", message, fields.get("params", line), job.id
+                )
+            )
         if job.id in jobs:
             issues.append(
                 ValidationIssue(
