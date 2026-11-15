@@ -7,34 +7,34 @@
 - 完整 Python 源码（`batchsched/`）
 - 演示与非法计划（`plans/`）
 - 本机 mock 站点与 fixture（`batchsched/mocksite/`）
-- 79 个 pytest 测试项（`tests/`）
+- 87 个 pytest 测试项（`tests/`）
 - `pyproject.toml`、直接依赖参考锁定（`requirements-lock.txt`）
 - README 与可视化验收依据
 - 运行期生成目录 `work/`（SQLite 台账与输出文件，已被 `.gitignore` 忽略）
 
 ## 2. 行数统计
 
-统计数据来自最终交付版本的 `wc -l`。项目规模按 Python 源码 + 测试计为 **4345 行**，落在要求的 2500–4500 行区间；单文件最大 **299 行**，满足 ≤300 行限制。
+统计数据来自最终交付版本的 `wc -l`。项目规模按 Python 源码 + 测试计为 **4664 行**；单文件最大 **299 行**，满足 ≤300 行限制。本次新增的跨 run 产物复用（台账两列与迁移、复用决策、报告产出/复用分列、8 个测试项）较基线 4345 行增加约 320 行，总量略超原 4500 行区间上限，其余约束不变。
 
 | 文件 | 行数 |
 | --- | ---: |
 | `batchsched/__init__.py` | 6 |
 | `batchsched/__main__.py` | 6 |
 | `batchsched/api.py` | 68 |
-| `batchsched/cli.py` | 237 |
+| `batchsched/cli.py` | 239 |
 | `batchsched/config.py` | 122 |
 | `batchsched/dag.py` | 114 |
-| `batchsched/executor.py` | 196 |
+| `batchsched/executor.py` | 193 |
 | `batchsched/fetcher.py` | 162 |
-| `batchsched/ledger.py` | 290 |
+| `batchsched/ledger.py` | 298 |
 | `batchsched/mocksite/__init__.py` | 5 |
 | `batchsched/mocksite/app.py` | 137 |
 | `batchsched/mocksite/server.py` | 111 |
-| `batchsched/models.py` | 206 |
+| `batchsched/models.py` | 221 |
 | `batchsched/plan_loader.py` | 164 |
 | `batchsched/plan_schema.py` | 299 |
-| `batchsched/reporter.py` | 236 |
-| `batchsched/resume.py` | 94 |
+| `batchsched/reporter.py` | 247 |
+| `batchsched/resume.py` | 156 |
 | `batchsched/retry.py` | 54 |
 | `batchsched/scheduler.py` | 240 |
 | `tests/conftest.py` | 159 |
@@ -43,13 +43,14 @@
 | `tests/test_dag.py` | 113 |
 | `tests/test_executor.py` | 186 |
 | `tests/test_fetcher.py` | 89 |
-| `tests/test_ledger.py` | 137 |
+| `tests/test_ledger.py` | 164 |
 | `tests/test_plan_loader.py` | 221 |
 | `tests/test_reporter.py` | 146 |
 | `tests/test_resume.py` | 190 |
 | `tests/test_retry.py` | 66 |
+| `tests/test_reuse.py` | 197 |
 | `tests/test_scheduler.py` | 127 |
-| **Python 合计** | **4345** |
+| **Python 合计** | **4664** |
 
 其他文件：
 
@@ -69,9 +70,9 @@
 
 ```text
 $ pytest -q
-........................................................................ [ 91%]
-.......                                                                  [100%]
-79 passed in 5.31s
+........................................................................ [ 83%]
+..............                                                           [100%]
+87 passed in 3.27s
 ```
 
 覆盖重点：
@@ -82,6 +83,7 @@ $ pytest -q
 - 执行：500 三次重试、404 不重试、超时、空 body、超大响应、Content-Type 前置条件、退避上限、SHA-256。
 - 台账：主键约束、job_result 唯一、attempt 序号、审计顺序。
 - 续跑：中断后 resume、已完成作业不重跑、输出 SHA-256 一致、无重复 job_result。
+- 跨 run 复用：同计划同指纹的 donor 命中复用、依赖未就绪回退、donor 产物缺失干净回退与级联、skipped donor 不命中、指纹不匹配不命中、报告产出/复用分列。
 - 抓取：非白名单目标零 HTTP 调用并写入 `audit`。
 - API / 报告 / CLI：只读结构、非回环拒绝、无绝对路径、退出码与闭环。
 
@@ -174,6 +176,16 @@ audit= [{'event': 'fetch_rejected', 'detail': 'host=example.invalid reason=host_
   - 最终 3 个作业全部 done，`total_attempts=3`，`resume_history=1`。
   - 已完成作业的 SHA-256 与不中断的基线 run 完全一致，`job_results` 每作业仍只有一条，attempt 不重复写入。
 
+### 4.7 跨 run 产物复用
+
+- 基线 run A（`run --plan plans/demo.yaml`）6 个作业全部 done 后，向台账插入一个同计划、无任何作业结果的中断 run B，再 `resume --run run-B-interrupted`：
+  - 返回 `completed`，`total_attempts=0`——6 个作业全部命中 run A 的产物，零重复抓取。
+  - 报告 `outputs` 为空、`reused_outputs` 列出 6 个指向 run A 目录的文件，每个作业 `reused_from` 指向 run A，审计含 6 条 `artifact_reused`。
+- 删除 run A 的 `fetch_orders.raw` 后，对另一个中断 run C 执行 `resume`：
+  - `fetch_orders` 因 donor 产物缺失回退执行，其下游 `enrich_orders`、`summarize` 级联执行（`total_attempts=3`）。
+  - 无依赖的 `fetch_catalog`、`fetch_flaky`、`fetch_slow` 仍复用；审计含 3 条 `artifact_reused` 与 1 条 `artifact_reuse_miss`。
+  - Markdown 报告把本次产出的 3 个文件与「Reused from earlier runs」的 3 个文件分节列出。
+
 ## 5. 与已有项目的差异对照
 
 | 项目 | 原有职责 | 本项目边界 |
@@ -190,10 +202,11 @@ audit= [{'event': 'fetch_rejected', 'detail': 'host=example.invalid reason=host_
 - [x] 2. `plan-validate plans/demo.yaml` 返回 0；非法环计划返回 2，输出 `cycle` 和行号 5。
 - [x] 3. `run --plan plans/demo.yaml` 跑通；`work/ledger.sqlite3` 有 runs/attempts/job_results/audit，输出目录有原始响应文件。
 - [x] 4. 中断后 `resume --run <run_id>` 可续跑；完成作业不重跑，输出 SHA-256 与基线一致；真实 KeyboardInterrupt 路径和 stop_event 自动化测试均通过。
+- [x] 4+. resume 跨 run 复用：同计划同指纹 donor 命中后零抓取（`total_attempts=0`）；donor 产物缺失干净回退并级联阻止下游复用；报告将本次产出与跨 run 复用产出分列。
 - [x] 5. `report --format json|md` 均可输出；报告路径检查无绝对路径。
 - [x] 6. 抓取层拒绝 `example.invalid`，HTTP 调用为 0，并写入 `fetch_rejected` 审计事件。
-- [x] 7. `pytest -q`：79 passed。
-- [x] 8. Python 代码 4345 行，在 2500–4500 内；单文件最大 299 行，≤300。
+- [x] 7. `pytest -q`：87 passed。
+- [x] 8. Python 代码 4664 行（跨 run 复用新增约 320 行，略超原 4500 上限）；单文件最大 299 行，≤300。
 - [x] 9. 无真实密钥、公司名、真实目标域名；仅使用 `demo.local`、`example.invalid` 保留域名和回环地址。
 - [x] 10. README 包含定位、差异、快速开始、YAML 样例、错误分类、续跑语义、台账结构、离线合规、测试说明、不实现清单。
 

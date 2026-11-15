@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import json
 from typing import Any
 
 from . import config
@@ -66,6 +68,17 @@ class JobSpec:
     depends_on: tuple[str, ...] = ()
     retry: RetryPolicy = field(default_factory=RetryPolicy)
     params: dict[str, Any] = field(default_factory=dict)
+
+    def fingerprint(self) -> str:
+        """Stable hash of the fetch inputs, used for cross-run artifact reuse."""
+
+        payload = json.dumps(
+            {"source": self.source, "params": self.params},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -140,6 +153,8 @@ class JobResult:
     size_bytes: int | None = None
     output_path: str | None = None
     reason: str | None = None
+    job_fingerprint: str | None = None
+    reused_from: str | None = None
 
     @property
     def is_terminal(self) -> bool:

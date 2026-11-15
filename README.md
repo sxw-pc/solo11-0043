@@ -127,6 +127,15 @@ python -m batchsched resume --run <run_id>
 - 台账追加 `audit` 事件 `resumed`。
 - 中断后输出 SHA-256 与不中断执行一致（测试覆盖）。
 
+### 跨 run 产物复用
+
+resume 还会向**更早结束的同计划 run** 借用产物，避免计划与参数都没变时的重复抓取：
+
+- 匹配条件：相同 `plan_path`、相同作业 id、相同作业指纹（`source` + `params` 的 SHA-256），且 donor 行是 `done` 并带有 `sha256` 与 `output_path`。donor 因上游失败只是 `skipped` 的行没有产物，即使指纹相同也不会命中。
+- 门控条件：作业的全部依赖在当前 run 已 `done` 或本身命中复用，否则照常执行（复用决策按拓扑序在 resume 开始时一次完成）。
+- 命中时当前 run 的 `job_results` 记为 `done`，`sha256`/`output_path` 指向 donor run 的相对路径，`reused_from` 记录来源 run，并写入 `artifact_reused` 审计。
+- donor 产物文件已被删除时不写任何复用记录，记一条 `artifact_reuse_miss` 审计后干净回退为正常执行；上游回退执行时，其下游的复用同样被阻止。
+
 ## 台账结构（SQLite）
 
 数据库默认位于 `work/ledger.sqlite3`。所有 SQL 集中在 `batchsched/ledger.py`。
@@ -135,12 +144,13 @@ python -m batchsched resume --run <run_id>
 | --- | --- | --- |
 | `runs` | `run_id`, `plan_path`, `started_at`, `finished_at`, `status`, `summary_json` | 一次调度 run |
 | `attempts` | `run_id`, `job_id`, `attempt_no`, `error_class`, `duration_ms`, `backoff_ms`, `started_at` | 每次尝试；主键阻止重复序号 |
-| `job_results` | `run_id`, `job_id`, `status`, `sha256`, `size_bytes`, `output_path`, `reason` | 每个作业的终态；主键保证唯一 |
+| `job_results` | `run_id`, `job_id`, `status`, `sha256`, `size_bytes`, `output_path`, `reason`, `job_fingerprint`, `reused_from` | 每个作业的终态；主键保证唯一；指纹与复用来源支撑跨 run 复用 |
 | `audit` | `run_id`, `event`, `detail`, `at` | 拒绝、重试、续跑、完成等事件 |
 
 ## 报告
 
 - JSON 汇报：run 状态、done/failed/skipped 计数、总 attempt 数、累计 attempt 耗时、失败分类计数、输出文件列表、作业与 attempt 明细。
+- 输出文件分两类列出：`outputs` 是本次执行产出的文件，`reused_outputs` 是跨 run 复用、仍存放在来源 run 目录下的文件；作业明细里的 `reused_from` 标明复用来源。
 - Markdown 复盘：按状态分组的作业表、失败作业的错误分类与 attempt 明细、续跑历史、审计事件摘要。
 - 报告中的路径都转换为相对路径（典型为 `work/output/runs/<run_id>/...`），计划路径若是绝对路径会折叠为文件名或相对路径。
 - 报告对固定台账内容可按相同顺序复现；唯一变化来源是 run 自身记录的时间和耗时。
@@ -160,13 +170,14 @@ python -m batchsched resume --run <run_id>
 pytest -q
 ```
 
-当前共有 **79 个测试项**，覆盖：
+当前共有 **87 个测试项**，覆盖：
 
 - 计划校验：重复 id、悬空依赖、自依赖、环、未知字段、非法 retry、作业上限、YAML 语法与行号。
 - DAG：拓扑分层、执行前沿、失败/skipped 传导、下游计算。
 - 调度：并发峰值、显式并发上限、失败跳过、已有 done 不重跑、中断、worker 异常隔离。
 - 抓取与执行：白名单拒绝且零 HTTP 调用、500/404/超时/空 body/超大响应分类、固定/指数退避、4xx 不重试、退避上限、输出 SHA-256。
 - 台账与续跑：唯一约束、attempt 序号、resume 不重复 job_result、中断后 SHA-256 与完整执行一致、`resumed` 审计。
+- 跨 run 复用：复用命中、依赖未就绪回退、donor 产物缺失回退与级联、skipped donor 不命中、指纹不匹配不命中、报告产出/复用分列。
 - API 与报告：只读端点、非回环拒绝、JSON/Markdown 结构、报告无绝对路径。
 - CLI：计划退出码、run/report 闭环。
 

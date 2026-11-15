@@ -116,7 +116,9 @@ def cmd_resume(args: argparse.Namespace) -> int:
     plan = load_plan(plan_path)
     with _local_mock(args.base_url) as base_url:
         executor = _executor(ledger, paths, args.run, base_url)
-        outcome = resume_run(ledger, plan, args.run, executor)
+        outcome = resume_run(
+            ledger, plan, args.run, executor, base_dir=Path(args.work_dir)
+        )
     report = build_report(ledger, args.run)
     _json_stdout(_outcome_payload(report, outcome.status))
     return _exit_code(outcome.status)

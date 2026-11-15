@@ -135,3 +135,30 @@ def test_run_details_aggregate(ledger, active_run):
     assert details["total_attempts"] == 1
     assert len(details["jobs"]) == 2
     assert ledger.get_run_details("missing") is None
+
+
+def test_migrate_adds_reuse_columns_to_old_database(tmp_path):
+    db_path = tmp_path / "old.sqlite3"
+    connection = sqlite3.connect(db_path)
+    connection.executescript(
+        """
+        CREATE TABLE runs (run_id TEXT PRIMARY KEY, plan_path TEXT NOT NULL,
+          started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL,
+          summary_json TEXT NOT NULL DEFAULT '{}');
+        CREATE TABLE job_results (run_id TEXT NOT NULL, job_id TEXT NOT NULL,
+          status TEXT NOT NULL, sha256 TEXT, size_bytes INTEGER,
+          output_path TEXT, reason TEXT, PRIMARY KEY (run_id, job_id));
+        INSERT INTO job_results VALUES
+          ('run-old', 'job_one', 'done', 'abc', 3, 'x/job_one.raw', NULL);
+        """
+    )
+    connection.close()
+    ledger = Ledger(db_path)
+    columns = {
+        row[1]
+        for row in sqlite3.connect(db_path).execute("PRAGMA table_info(job_results)")
+    }
+    assert {"job_fingerprint", "reused_from"} <= columns
+    result = ledger.get_job_results("run-old")[0]
+    assert result.status == config.JOB_DONE
+    assert result.job_fingerprint is None and result.reused_from is None

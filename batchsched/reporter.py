@@ -38,11 +38,13 @@ def build_report(
     )
     audit_counts = Counter(str(item["event"]) for item in details["audit"])
     total_duration_ms = sum(int(item["duration_ms"]) for item in attempts)
-    outputs = sorted(
-        _relative_path(result["output_path"], base, run_id)
-        for result in results
-        if result.get("output_path")
-    )
+    produced, reused = [], []
+    for result in results:
+        if result.get("output_path"):
+            path = _relative_path(result["output_path"], base, run_id)
+            (reused if result.get("reused_from") else produced).append(path)
+    outputs = sorted(produced)
+    reused_outputs = sorted(reused)
     jobs = []
     for result in results:
         job_attempts = [
@@ -65,6 +67,7 @@ def build_report(
                 "output_path": _relative_path(
                     result.get("output_path"), base, run_id
                 ),
+                "reused_from": result.get("reused_from"),
                 "reason": _safe_text(result.get("reason"), base),
                 "attempts": job_attempts,
             }
@@ -89,6 +92,7 @@ def build_report(
         "total_attempt_duration_ms": total_duration_ms,
         "failure_class_counts": dict(sorted(failure_counts.items())),
         "outputs": outputs,
+        "reused_outputs": reused_outputs,
         "jobs": jobs,
         "resume_history": [
             {
@@ -176,6 +180,13 @@ def to_markdown(report: dict[str, Any]) -> str:
         lines.extend(f"- `{path}`" for path in report["outputs"])
     else:
         lines.append("No output files.")
+    if report["reused_outputs"]:
+        donors = {job["output_path"]: job["reused_from"] for job in report["jobs"]
+                  if job["reused_from"] and job["output_path"]}
+        lines.extend(["", "Reused from earlier runs:", ""])
+        for path in report["reused_outputs"]:
+            suffix = f" (from `{donors[path]}`)" if path in donors else ""
+            lines.append(f"- `{path}`{suffix}")
     lines.extend(["", "## Resume history", ""])
     if report["resume_history"]:
         for event in report["resume_history"]:

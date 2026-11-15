@@ -74,13 +74,10 @@ class JobExecutor:
                 )
                 self.ledger.save_job_result(
                     JobResult(
-                        run_id=self.run_id,
-                        job_id=job.id,
-                        status=config.JOB_DONE,
-                        sha256=digest,
-                        size_bytes=size_bytes,
-                        output_path=ledger_path,
-                        reason=None,
+                        run_id=self.run_id, job_id=job.id, status=config.JOB_DONE,
+                        sha256=digest, size_bytes=size_bytes,
+                        output_path=ledger_path, reason=None,
+                        job_fingerprint=job.fingerprint(),
                     )
                 )
                 self.ledger.add_audit(
@@ -119,7 +116,7 @@ class JobExecutor:
             )
             reason = f"{error_class}: {detail}"
             if backoff_ms is None:
-                self._record_failure(job.id, reason)
+                self._record_failure(job, reason)
                 return ExecutionOutcome(
                     job_id=job.id,
                     status=config.JOB_FAILED,
@@ -175,16 +172,16 @@ class JobExecutor:
             ) from exc
         return target
 
-    def _record_failure(self, job_id: str, reason: str) -> None:
+    def _record_failure(self, job: JobSpec, reason: str) -> None:
         self.ledger.save_job_result(
             JobResult(
-                run_id=self.run_id,
-                job_id=job_id,
-                status=config.JOB_FAILED,
-                reason=reason,
+                run_id=self.run_id, job_id=job.id, status=config.JOB_FAILED,
+                reason=reason, job_fingerprint=job.fingerprint(),
             )
         )
-        self.ledger.add_audit(self.run_id, "job_failed", f"job={job_id} reason={reason}")
+        self.ledger.add_audit(
+            self.run_id, "job_failed", f"job={job.id} reason={reason}"
+        )
 
 
 def _elapsed_ms(started: float) -> int:
