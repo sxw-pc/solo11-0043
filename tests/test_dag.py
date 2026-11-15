@@ -8,6 +8,8 @@ from batchsched.dag import (
     downstream_of,
     frontier,
     initial_ready_set,
+    layer_ranks,
+    order_for_dispatch,
     topological_layers,
     topological_order,
 )
@@ -111,3 +113,55 @@ def test_topological_layers_cycle_detection():
     )
     with pytest.raises(ValueError, match="cycle"):
         topological_layers(cyclic)
+
+
+PRIORITY_PLAN = """
+name: priority
+concurrency: 4
+jobs:
+  - id: root_low
+    source: /api/catalog
+    priority: -5
+  - id: root_high
+    source: /api/catalog
+    priority: 20
+  - id: root_mid_b
+    source: /api/catalog
+  - id: root_mid_a
+    source: /api/catalog
+  - id: layer_two_high
+    source: /api/orders
+    depends_on: [root_low]
+    priority: 99
+"""
+
+
+def test_layer_ranks_follow_topological_layers():
+    dag = parse_plan_text(PRIORITY_PLAN)
+    ranks = layer_ranks(dag)
+    assert ranks["root_low"] == ranks["root_high"] == 0
+    assert ranks["layer_two_high"] == 1
+
+
+def test_order_for_dispatch_uses_layer_then_priority_then_id():
+    dag = parse_plan_text(PRIORITY_PLAN)
+    ready = frontier(dag, completed=frozenset())
+    assert order_for_dispatch(dag, ready) == [
+        "root_high",
+        "root_mid_a",
+        "root_mid_b",
+        "root_low",
+    ]
+
+
+def test_order_for_dispatch_never_promotes_dependency_blocked_job():
+    dag = parse_plan_text(PRIORITY_PLAN)
+    ready = frontier(dag, completed=frozenset())
+    ordered = order_for_dispatch(dag, ready)
+    assert "layer_two_high" not in ordered
+    ranks = layer_ranks(dag)
+    assert ranks["layer_two_high"] > ranks["root_low"]
+    after_root = frontier(dag, completed={"root_low"})
+    ordered_after = order_for_dispatch(dag, after_root)
+    assert ordered_after[-1] == "layer_two_high"
+    assert ordered_after[:3] == ["root_high", "root_mid_a", "root_mid_b"]

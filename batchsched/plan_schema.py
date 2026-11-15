@@ -11,7 +11,13 @@ from . import config
 from .models import JobSpec, RetryPolicy, ValidationIssue
 
 ALLOWED_TOP = {"name", "concurrency", "jobs"}
-ALLOWED_JOB = {"id", "source", "depends_on", "retry", "params"}
+ALLOWED_JOB = {"id", "source", "depends_on", "retry", "params", "priority"}
+
+# Priority is only used to order jobs *within* the same topological layer.
+# The neutral default keeps plans without explicit priorities unchanged.
+MIN_PRIORITY = -100
+MAX_PRIORITY = 100
+NEUTRAL_PRIORITY = 0
 ALLOWED_RETRY = {
     "mode",
     "max_attempts",
@@ -93,11 +99,19 @@ def parse_job(
             )
         )
         params = {}
+    priority = (
+        parse_priority(
+            raw["priority"], field_lines.get("priority", line), job_id, issues
+        )
+        if "priority" in raw
+        else NEUTRAL_PRIORITY
+    )
     retry = parse_retry(raw.get("retry"), field_lines.get("retry", line), job_id, issues)
     return JobSpec(
         id=job_id,
         source=str(source),
         depends_on=tuple(deps),
+        priority=int(priority),
         retry=retry,
         params=dict(params),
     )
@@ -249,6 +263,27 @@ def valid_source(source: Any) -> bool:
 
 def is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def parse_priority(
+    raw: Any,
+    line: int | None,
+    job_id: str,
+    issues: list[ValidationIssue],
+) -> int:
+    """Validate an optional job priority; missing values stay neutral."""
+
+    if not is_int(raw) or not MIN_PRIORITY <= raw <= MAX_PRIORITY:
+        issues.append(
+            ValidationIssue(
+                "invalid_priority",
+                f"priority must be an integer between {MIN_PRIORITY} and {MAX_PRIORITY}",
+                line,
+                job_id,
+            )
+        )
+        return NEUTRAL_PRIORITY
+    return int(raw)
 
 
 def line_of(node: Any) -> int | None:

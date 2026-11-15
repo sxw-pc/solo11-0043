@@ -141,6 +141,34 @@ def test_report_is_deterministic(ledger, tmp_path):
     assert first == second
 
 
+def test_dispatch_order_is_observable_and_stable(ledger, tmp_path):
+    run_id = "run-report-0001"
+    _seed_report(ledger, run_id, tmp_path)
+    for job_id in ("fetch_done", "fetch_failed", "fetch_skipped"):
+        ledger.record_dispatch(run_id, job_id)
+    report = build_report(ledger, run_id)
+    expected = ["fetch_done", "fetch_failed", "fetch_skipped"]
+    assert report["dispatch_order"] == expected
+    json_text = to_json(report)
+    assert json.loads(json_text)["dispatch_order"] == expected
+    markdown = to_markdown(report)
+    assert "## Dispatch order" in markdown
+    dispatch_section = markdown.split("## Dispatch order", 1)[1].split("##", 1)[0]
+    assert "`fetch_done`" in dispatch_section
+    assert dispatch_section.index("`fetch_done`") < dispatch_section.index(
+        "`fetch_failed`"
+    )
+    assert to_json(build_report(ledger, run_id)) == json_text
+
+
+def test_report_without_dispatch_history_has_empty_order(ledger, tmp_path):
+    run_id = "run-report-0001"
+    _seed_report(ledger, run_id, tmp_path)
+    report = build_report(ledger, run_id)
+    assert report["dispatch_order"] == []
+    assert "No jobs were dispatched." in to_markdown(report)
+
+
 def test_missing_report_raises_key_error(ledger):
     with pytest.raises(KeyError):
         build_report(ledger, "run-not-found")

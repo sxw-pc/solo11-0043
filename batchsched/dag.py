@@ -38,6 +38,43 @@ def topological_order(dag: PlanDag) -> list[str]:
     return [job_id for layer in topological_layers(dag) for job_id in layer]
 
 
+def layer_ranks(dag: PlanDag) -> dict[str, int]:
+    """Zero-based topological layer for every job.
+
+    Dispatch ordering may only reorder jobs that live in the same layer;
+    comparing these ranks keeps an earlier layer strictly ahead of a later one.
+    """
+
+    return {
+        job_id: index
+        for index, layer in enumerate(topological_layers(dag))
+        for job_id in layer
+    }
+
+
+def order_for_dispatch(
+    dag: PlanDag,
+    job_ids: Iterable[str],
+    ranks: dict[str, int] | None = None,
+) -> list[str]:
+    """Rank already-executable jobs for dispatch.
+
+    The key is explicit and total, so thread-pool submission order can never
+    decide the outcome: topological layer first, then higher priority, then
+    lexical job id.  Callers must only pass jobs from :func:`frontier`; this
+    function never adds a job whose dependencies are unfinished.
+    """
+
+    layer_by_job = ranks if ranks is not None else layer_ranks(dag)
+    missing = len(layer_by_job)
+
+    def key(job_id: str) -> tuple[int, int, str]:
+        job = dag.jobs[job_id]
+        return (layer_by_job.get(job_id, missing), -job.priority, job_id)
+
+    return sorted(job_ids, key=key)
+
+
 def frontier(
     dag: PlanDag,
     completed: Iterable[str],

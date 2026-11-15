@@ -78,6 +78,7 @@ def build_report(
             "started_at": run.get("started_at"),
             "finished_at": run.get("finished_at"),
         },
+        "dispatch_order": [item["job_id"] for item in details["dispatch"]],
         "job_counts": {
             "done": counts.get(config.JOB_DONE, 0),
             "failed": counts.get(config.JOB_FAILED, 0),
@@ -123,6 +124,7 @@ def to_markdown(report: dict[str, Any]) -> str:
         f"- Total attempts: {report['total_attempts']}",
         f"- Total attempt duration: {report['total_attempt_duration_ms']} ms",
         f"- Failure classes: {_inline_classes(report['failure_class_counts'])}",
+        f"- Dispatch order: {_inline_dispatch(report['dispatch_order'])}",
         "",
         "## Jobs by status",
         "",
@@ -143,6 +145,12 @@ def to_markdown(report: dict[str, Any]) -> str:
                     reason=_cell(job["reason"] or "-"),
                 )
             )
+    lines.extend(["", "## Dispatch order", ""])
+    if report["dispatch_order"]:
+        for index, job_id in enumerate(report["dispatch_order"], start=1):
+            lines.append(f"{index}. `{job_id}`")
+    else:
+        lines.append("No jobs were dispatched.")
     lines.extend(["", "## Failure and retry details", ""])
     failure_jobs = [job for job in report["jobs"] if job["status"] != config.JOB_DONE]
     if not failure_jobs:
@@ -234,3 +242,9 @@ def _inline_classes(counts: dict[str, int]) -> str:
     if not counts:
         return "none"
     return ", ".join(f"{name}={count}" for name, count in counts.items())
+
+
+def _inline_dispatch(order: list[str]) -> str:
+    if not order:
+        return "none"
+    return " → ".join(f"`{job_id}`" for job_id in order)

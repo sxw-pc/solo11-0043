@@ -6,6 +6,7 @@ jobs:
   - id: fetch_catalog
     source: /api/catalog
     depends_on: []
+    priority: 10
     retry:
       mode: exponential
       max_attempts: 3
@@ -16,6 +17,7 @@ jobs:
   - id: fetch_orders
     source: /api/orders
     depends_on: [fetch_catalog]
+    priority: 5
     retry:
       mode: fixed
       max_attempts: 2
@@ -24,6 +26,7 @@ jobs:
   - id: enrich_orders
     source: /api/orders/enriched
     depends_on: [fetch_orders]
+    priority: 25
     retry:
       mode: fixed
       max_attempts: 2
@@ -34,6 +37,7 @@ jobs:
   - id: fetch_flaky
     source: /api/flaky
     depends_on: []
+    priority: -15
     retry:
       mode: fixed
       max_attempts: 3
@@ -42,6 +46,7 @@ jobs:
   - id: fetch_slow
     source: /api/slow
     depends_on: [fetch_catalog]
+    priority: 5
     retry:
       mode: exponential
       max_attempts: 2
@@ -50,6 +55,7 @@ jobs:
   - id: summarize
     source: /api/summary
     depends_on: [enrich_orders, fetch_flaky, fetch_slow]
+    priority: 50
     retry:
       mode: fixed
       max_attempts: 1

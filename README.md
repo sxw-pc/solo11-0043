@@ -85,6 +85,7 @@ jobs:
 - `depends_on` 中的作业必须存在，且不能自依赖或重复。
 - 计划不能有环；校验错误带 YAML 行号。
 - 未知的顶层字段、作业字段和 retry 字段都会被拒绝。
+- `priority` 可选，取 `-100`–`100` 的整数，缺省 `0`；非法值按行号报错。
 - 作业数上限 200；并发上限 8；重试次数 1–5；退避基数 0–10000 ms；单作业累计退避不超过 10 s。
 - `retryable` 可以显式覆盖默认可重试错误集合。
 
@@ -93,11 +94,12 @@ jobs:
 1. `plan-validate` 只读 YAML，不创建数据库。
 2. `run` 创建唯一 `run_id`，按 `min(计划 concurrency, 全局上界 8)` 建线程池。
 3. 作业只有在所有依赖均为 `done` 时才进入执行前沿；依赖 `failed`/`skipped` 的作业直接标记 `skipped`，原因固定为 `upstream_failed`，并继续向下传导。
-4. 单个作业内部的重试串行执行；不同作业可以并行。
-5. 成功后原始响应写入 `work/output/runs/<run_id>/<job_id>.raw`，并记录 SHA-256、字节数和相对输出路径。
-6. 每次尝试写入 `attempts`；每个作业在同一个 run 下只有一条 `job_results`（主键 `(run_id, job_id)`）。
-7. run 的最终状态为 `completed`（全部 done）、`failed`（存在 failed/skipped）或 `interrupted`（收到中断）。
-8. `run` 在 5600 端口不可用时会自动启动内置 mock 站点，结束后停止它；如果 `serve` 已在运行则复用，不会重复启动。
+4. 当可执行作业多于空闲 worker 时按派发秩选人：**先按拓扑层**（层号小者优先），同层按 `priority` 降序，同层同优先级按 `job_id` 字典序。派发秩只在已就绪前沿内生效，不会把整图按 priority 全局排序，因此不会提前选中依赖未完成的作业。
+5. 单个作业内部的重试串行执行；不同作业可以并行。同一作业在一次 run 中只派发一次；每次派发按实际提交次序追加到台账 `dispatch` 表，报告中的 `dispatch_order` 即由此重建。
+6. 成功后原始响应写入 `work/output/runs/<run_id>/<job_id>.raw`，并记录 SHA-256、字节数和相对输出路径。
+7. 每次尝试写入 `attempts`；每个作业在同一个 run 下只有一条 `job_results`（主键 `(run_id, job_id)`）。
+8. run 的最终状态为 `completed`（全部 done）、`failed`（存在 failed/skipped）或 `interrupted`（收到中断）。
+9. `run` 在 5600 端口不可用时会自动启动内置 mock 站点，结束后停止它；如果 `serve` 已在运行则复用，不会重复启动。
 
 ## 错误分类
 
@@ -123,6 +125,7 @@ python -m batchsched resume --run <run_id>
 - 已 `done` 的作业不重新执行、不重写输出文件，SHA-256 保持原值。
 - 已 `failed` 的作业保持失败；其下游保持/补记 `skipped`，不会在 resume 时自动重试失败作业（保守续跑）。
 - 尚未执行且依赖满足的作业进入前沿继续执行，attempt 序号在已有记录之后递增。
+- 已记录在历史 `dispatch_order` 中的作业保持原位；续跑新增的派发只追加在其后，不会因优先级重排已完成作业。
 - 每个作业仍只有一条 `job_results` 记录，不会因续跑产生重复结果。
 - 台账追加 `audit` 事件 `resumed`。
 - 中断后输出 SHA-256 与不中断执行一致（测试覆盖）。
@@ -137,11 +140,12 @@ python -m batchsched resume --run <run_id>
 | `attempts` | `run_id`, `job_id`, `attempt_no`, `error_class`, `duration_ms`, `backoff_ms`, `started_at` | 每次尝试；主键阻止重复序号 |
 | `job_results` | `run_id`, `job_id`, `status`, `sha256`, `size_bytes`, `output_path`, `reason` | 每个作业的终态；主键保证唯一 |
 | `audit` | `run_id`, `event`, `detail`, `at` | 拒绝、重试、续跑、完成等事件 |
+| `dispatch` | `seq`, `run_id`, `job_id`, `at` | 按实际提交次序追加的派发台账；报告据此重建 `dispatch_order` |
 
 ## 报告
 
-- JSON 汇报：run 状态、done/failed/skipped 计数、总 attempt 数、累计 attempt 耗时、失败分类计数、输出文件列表、作业与 attempt 明细。
-- Markdown 复盘：按状态分组的作业表、失败作业的错误分类与 attempt 明细、续跑历史、审计事件摘要。
+- JSON 汇报：run 状态、done/failed/skipped 计数、总 attempt 数、累计 attempt 耗时、失败分类计数、输出文件列表、`dispatch_order` 实际派发次序、作业与 attempt 明细。
+- Markdown 复盘：摘要中的派发次序、按状态分组的作业表、独立 `## Dispatch order` 小节、失败作业的错误分类与 attempt 明细、续跑历史、审计事件摘要。
 - 报告中的路径都转换为相对路径（典型为 `work/output/runs/<run_id>/...`），计划路径若是绝对路径会折叠为文件名或相对路径。
 - 报告对固定台账内容可按相同顺序复现；唯一变化来源是 run 自身记录的时间和耗时。
 

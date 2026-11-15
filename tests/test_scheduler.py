@@ -125,3 +125,94 @@ def test_worker_exception_becomes_failed_result(ledger, active_run, fake_executo
     )
     assert result.status == config.JOB_FAILED
     assert "worker_exception" in result.reason
+
+
+PRIORITY_PLAN = """
+name: priority
+concurrency: 1
+jobs:
+  - id: root_low
+    source: /api/catalog
+    priority: -5
+  - id: root_high
+    source: /api/catalog
+    priority: 20
+  - id: root_mid_b
+    source: /api/catalog
+  - id: root_mid_a
+    source: /api/catalog
+  - id: layer_two_high
+    source: /api/orders
+    depends_on: [root_low]
+    priority: 99
+"""
+
+
+def test_dispatch_uses_layer_then_priority_then_id(ledger, active_run, fake_executor_cls):
+    plan = parse_plan_text(PRIORITY_PLAN)
+    executor = fake_executor_cls(ledger, active_run)
+    outcome = Scheduler(plan, ledger, active_run, executor).run()
+    expected = ["root_high", "root_mid_a", "root_mid_b", "root_low", "layer_two_high"]
+    assert executor.executed == expected
+    assert list(outcome.dispatch_order) == expected
+    assert ledger.get_dispatch_order(active_run) == expected
+
+
+def test_priority_never_dispatches_job_before_its_dependency(
+    ledger, active_run, fake_executor_cls
+):
+    plan = parse_plan_text(PRIORITY_PLAN)
+    executor = fake_executor_cls(ledger, active_run)
+    Scheduler(plan, ledger, active_run, executor, max_workers=8).run()
+    order = ledger.get_dispatch_order(active_run)
+    assert order.index("layer_two_high") > order.index("root_low")
+    assert order.count("layer_two_high") == 1
+
+
+def test_dispatch_order_is_unique_under_repeated_frontier_queries(
+    ledger, active_run, fake_executor_cls
+):
+    plan = _parallel_plan(6, 2)
+    executor = fake_executor_cls(ledger, active_run, delay=0.02)
+    outcome = Scheduler(plan, ledger, active_run, executor).run()
+    order = list(outcome.dispatch_order)
+    assert sorted(order) == sorted(executor.executed)
+    assert len(order) == len(set(order)) == 6
+
+
+def test_same_priority_order_does_not_leak_pool_submission(ledger, active_run, fake_executor_cls):
+    plan = _parallel_plan(6, 3)
+    executor = fake_executor_cls(ledger, active_run, delay=0.01)
+    outcome = Scheduler(plan, ledger, active_run, executor).run()
+    assert list(outcome.dispatch_order) == [f"job_{index}" for index in range(6)]
+
+
+def test_resume_appends_new_dispatch_after_recorded_history(
+    ledger, active_run, fake_executor_cls
+):
+    plan = parse_plan_text(PRIORITY_PLAN)
+    ledger.save_job_result(
+        JobResult(run_id=active_run, job_id="root_low", status=config.JOB_DONE)
+    )
+    ledger.record_dispatch(active_run, "root_low")
+    executor = fake_executor_cls(ledger, active_run)
+    outcome = execute_once(plan, ledger, active_run, executor)
+    order = ledger.get_dispatch_order(active_run)
+    assert order[0] == "root_low"
+    assert order[1:] == ["root_high", "root_mid_a", "root_mid_b", "layer_two_high"]
+    assert list(outcome.dispatch_order) == order
+    assert "root_low" not in executor.executed
+
+
+def test_history_dispatched_but_unfinished_job_is_dispatched_once_more(
+    ledger, active_run, fake_executor_cls
+):
+    """A prior attempt left no result: it stays pending and is dispatched once."""
+
+    plan = _parallel_plan(3, 1)
+    executor = fake_executor_cls(ledger, active_run)
+    outcome = Scheduler(plan, ledger, active_run, executor).run()
+    order = ledger.get_dispatch_order(active_run)
+    assert order == ["job_0", "job_1", "job_2"]
+    assert list(outcome.dispatch_order) == order
+    assert executor.executed == ["job_0", "job_1", "job_2"]

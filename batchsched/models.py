@@ -66,12 +66,14 @@ class JobSpec:
     depends_on: tuple[str, ...] = ()
     retry: RetryPolicy = field(default_factory=RetryPolicy)
     params: dict[str, Any] = field(default_factory=dict)
+    priority: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "source": self.source,
             "depends_on": list(self.depends_on),
+            "priority": self.priority,
             "retry": {
                 "mode": self.retry.mode,
                 "max_attempts": self.retry.max_attempts,
@@ -176,6 +178,7 @@ class SchedulerOutcome:
     status: str
     states: dict[str, str]
     interrupted: bool = False
+    dispatch_order: tuple[str, ...] = ()
 
     @property
     def counts(self) -> dict[str, int]:

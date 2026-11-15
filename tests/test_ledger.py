@@ -32,7 +32,7 @@ def test_schema_tables_and_primary_keys(tmp_path):
         }
         attempt_pk = connection.execute("PRAGMA table_info(attempts)").fetchall()
         result_pk = connection.execute("PRAGMA table_info(job_results)").fetchall()
-    assert {"runs", "attempts", "job_results", "audit"} <= names
+    assert {"runs", "attempts", "job_results", "audit", "dispatch"} <= names
     assert [row[1] for row in attempt_pk if row[5]] == [
         "run_id",
         "job_id",
@@ -120,6 +120,16 @@ def test_audit_order_and_output_paths(ledger, active_run):
         "work/output/runs/x/job_a.raw",
         "work/output/runs/x/job_b.raw",
     ]
+
+
+def test_dispatch_records_are_append_only_and_ordered(ledger, active_run):
+    ledger.record_dispatch(active_run, "job_b", "2026-01-01T00:00:00Z")
+    ledger.record_dispatch(active_run, "job_a", "2026-01-01T00:00:01Z")
+    ledger.record_dispatch("run-other", "job_x")
+    assert ledger.get_dispatch_order(active_run) == ["job_b", "job_a"]
+    records = ledger.get_dispatch_records(active_run)
+    assert [item["seq"] for item in records] == [1, 2]
+    assert ledger.get_run_details(active_run)["dispatch"] == records
 
 
 def test_run_details_aggregate(ledger, active_run):

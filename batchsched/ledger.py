@@ -47,8 +47,15 @@ CREATE TABLE IF NOT EXISTS audit (
   detail TEXT NOT NULL DEFAULT '',
   at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS dispatch (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  job_id TEXT NOT NULL,
+  at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_attempts_run ON attempts(run_id, job_id, attempt_no);
 CREATE INDEX IF NOT EXISTS idx_audit_run ON audit(run_id, id);
+CREATE INDEX IF NOT EXISTS idx_dispatch_run ON dispatch(run_id, seq);
 """
 
 
@@ -174,6 +181,33 @@ class Ledger:
                 (run_id, event, detail, at or config.utc_now_iso()),
             )
 
+    def record_dispatch(
+        self, run_id: str, job_id: str, at: str | None = None
+    ) -> None:
+        """Append one dispatch in the order the scheduler submitted it."""
+
+        with self._connection() as connection:
+            connection.execute(
+                "INSERT INTO dispatch(run_id, job_id, at) VALUES (?, ?, ?)",
+                (run_id, job_id, at or config.utc_now_iso()),
+            )
+
+    def get_dispatch_order(self, run_id: str) -> list[str]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT job_id FROM dispatch WHERE run_id = ? ORDER BY seq",
+                (run_id,),
+            ).fetchall()
+        return [str(row["job_id"]) for row in rows]
+
+    def get_dispatch_records(self, run_id: str) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT seq, job_id, at FROM dispatch WHERE run_id = ? ORDER BY seq",
+                (run_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def next_attempt_no(self, run_id: str, job_id: str) -> int:
         with self._connection() as connection:
             row = connection.execute(
@@ -244,6 +278,7 @@ class Ledger:
         results = self.get_job_results(run_id)
         attempts = self.get_attempts(run_id)
         audit = self.get_audit(run_id)
+        dispatch = self.get_dispatch_records(run_id)
         counts = {
             config.JOB_DONE: 0,
             config.JOB_FAILED: 0,
@@ -258,6 +293,7 @@ class Ledger:
             "jobs": [_result_dict(result) for result in results],
             "attempts": attempts,
             "audit": audit,
+            "dispatch": dispatch,
         }
 
     def output_paths(self, run_id: str) -> list[str]:

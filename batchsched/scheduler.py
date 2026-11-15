@@ -7,7 +7,7 @@ from threading import Event
 from typing import Callable
 
 from . import config
-from .dag import blocked_jobs, frontier
+from .dag import blocked_jobs, frontier, layer_ranks, order_for_dispatch
 from .ledger import Ledger
 from .models import (
     ExecutionOutcome,
@@ -43,6 +43,11 @@ class Scheduler:
         for job_id, status in terminal_states(initial_results or []).items():
             if job_id in self.states:
                 self.states[job_id] = status
+        # Computed once: a job's topological layer never changes during a run.
+        self._layer_ranks = layer_ranks(plan)
+        # Dispatch order is persisted as it happens so resume never reorders
+        # already recorded history; it is mirrored here for in-process callers.
+        self.dispatch_order: list[str] = ledger.get_dispatch_order(run_id)
 
     def run(self) -> SchedulerOutcome:
         interrupted = False
@@ -96,6 +101,7 @@ class Scheduler:
             status=status,
             states=dict(self.states),
             interrupted=interrupted,
+            dispatch_order=tuple(self.dispatch_order),
         )
 
     def _dispatch(
@@ -115,8 +121,11 @@ class Scheduler:
             for job_id in available
             if self.states[job_id] == config.JOB_PENDING
         ]
+        available = order_for_dispatch(self.plan, available, self._layer_ranks)
         for job_id in available[:free]:
             self.states[job_id] = config.JOB_RUNNING
+            self.ledger.record_dispatch(self.run_id, job_id)
+            self.dispatch_order.append(job_id)
             futures[pool.submit(self.executor.execute, self.plan.jobs[job_id])] = job_id
             self._emit("job_started", job_id)
 

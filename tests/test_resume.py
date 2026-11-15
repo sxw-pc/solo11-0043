@@ -188,3 +188,38 @@ def test_resume_state_counts(ledger):
     assert state.skipped == ()
     assert state.pending == ("fetch_c",)
     assert state.summary()["pending"] == 1
+
+
+def test_resume_appends_dispatch_without_reordering_done_jobs(
+    mock_base_url, ledger, tmp_path
+):
+    plan = parse_plan_text(PLAN_TEXT)
+    run_id = "run-dispatch-resume"
+    ledger.create_run(run_id, "plans/resume.yaml", config.utc_now_iso())
+    stop = Event()
+
+    def interrupt(event_name, job_id):
+        if event_name == "job_done" and job_id == "fetch_a":
+            stop.set()
+
+    first = Scheduler(
+        plan,
+        ledger,
+        run_id,
+        _executor(ledger, run_id, mock_base_url, tmp_path / "out"),
+        stop_event=stop,
+        on_event=interrupt,
+    ).run()
+    assert first.status == config.RUN_INTERRUPTED
+    assert ledger.get_dispatch_order(run_id) == ["fetch_a"]
+
+    resumed = resume_run(
+        ledger,
+        plan,
+        run_id,
+        _executor(ledger, run_id, mock_base_url, tmp_path / "out"),
+    )
+    assert resumed.status == config.RUN_COMPLETED
+    order = ledger.get_dispatch_order(run_id)
+    assert order == ["fetch_a", "fetch_b", "fetch_c"]
+    assert list(resumed.dispatch_order) == order

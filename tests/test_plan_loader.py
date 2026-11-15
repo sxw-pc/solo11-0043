@@ -30,6 +30,48 @@ jobs:
     assert plan.job("fetch_one").retry.mode == "fixed"
     assert plan.job("fetch_one").retry.max_attempts == 3
     assert plan.job("fetch_two").params == {"min_bytes": 2}
+    assert plan.job("fetch_one").priority == 0
+
+
+def test_priority_is_optional_and_validated():
+    plan = parse_plan_text(
+        """
+jobs:
+  - id: fetch_high
+    source: /api/catalog
+    priority: 7
+  - id: fetch_low
+    source: /api/orders
+    priority: -3
+  - id: fetch_default
+    source: /api/summary
+"""
+    )
+    assert plan.job("fetch_high").priority == 7
+    assert plan.job("fetch_low").priority == -3
+    assert plan.job("fetch_default").priority == 0
+    priorities = {
+        item["id"]: item["priority"] for item in plan.to_dict()["jobs"]
+    }
+    assert priorities == {"fetch_high": 7, "fetch_low": -3, "fetch_default": 0}
+
+    bad = """
+jobs:
+  - id: fetch_one
+    source: /api/catalog
+    priority: 101
+  - id: fetch_two
+    source: /api/catalog
+    priority: extreme
+  - id: fetch_three
+    source: /api/catalog
+    priority: true
+"""
+    with pytest.raises(PlanValidationError) as caught:
+        parse_plan_text(bad)
+    issues = [issue for issue in caught.value.issues if issue.code == "invalid_priority"]
+    assert len(issues) == 3
+    assert [issue.line for issue in issues] == [5, 8, 11]
 
 
 def test_demo_plan_loads():
