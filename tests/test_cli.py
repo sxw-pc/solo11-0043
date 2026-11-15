@@ -74,3 +74,47 @@ def test_cli_report_missing_run(tmp_path, capsys):
     captured = capsys.readouterr()
     assert code == 1
     assert "run not found" in captured.err
+
+
+def test_cli_plan_validate_rejects_bad_params_with_line(tmp_path, write_plan, capsys):
+    plan_path = write_plan(
+        """
+name: bad-params
+jobs:
+  - id: fetch_one
+    source: /api/concurrency
+    params:
+      query:
+        delay_ms: 999
+      headers:
+        authorization: Bearer token
+"""
+    )
+    code = main(["plan-validate", str(plan_path)])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert payload["ok"] is False
+    codes = {error["code"] for error in payload["errors"]}
+    assert codes == {"invalid_params"}
+    assert all(error["line"] > 0 for error in payload["errors"])
+
+
+def test_cli_run_demo_params_plan(tmp_path, mock_base_url, capsys):
+    plan_path = ROOT / "plans" / "demo_params.yaml"
+    code = main(
+        [
+            "--work-dir",
+            str(tmp_path),
+            "run",
+            "--plan",
+            str(plan_path),
+            "--base-url",
+            mock_base_url,
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["status"] == "completed"
+    outputs = [Path(item) for item in payload["outputs"]]
+    raw = next(item for item in outputs if item.name == "concurrency_delayed.raw")
+    assert b'"delay_ms":25' in (tmp_path / raw).read_bytes()

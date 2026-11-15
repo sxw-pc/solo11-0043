@@ -6,16 +6,159 @@ resolution of public names: only loopback hosts are accepted.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import time
-from typing import Callable
-from urllib.parse import urlparse
+from typing import Any, Callable
+from urllib.parse import (
+    parse_qsl,
+    urlencode,
+    urlparse,
+    urlsplit,
+    urlunsplit,
+)
 
 import requests
 
 from . import config
 
 AuditHook = Callable[[str, str], None]
+
+
+def canonical_header_name(name: Any) -> str | None:
+    """Map a planned header name onto the fixed allow-list, case-insensitively."""
+
+    if not isinstance(name, str):
+        return None
+    return config.REQUEST_HEADER_NAMES.get(name.casefold())
+
+
+def query_value_problem(key: str, value: Any) -> str | None:
+    """Return why a query value is unacceptable, or ``None`` when valid.
+
+    Values are deliberately restricted to short integer scalars (YAML integers
+    or their decimal string form).  Floats, booleans, containers and any text
+    outside the per-key range are rejected.
+    """
+
+    limits = config.QUERY_PARAM_RULES.get(key)
+    if limits is None:
+        return f"query parameter '{key}' is not allowed"
+    minimum, maximum = limits
+    if isinstance(value, str):
+        if len(value) > config.MAX_QUERY_VALUE_LENGTH:
+            return "value exceeds the maximum length"
+        if not value.isdigit():
+            return "value must be a short integer scalar"
+        number = int(value)
+    elif isinstance(value, int) and not isinstance(value, bool):
+        number = value
+    else:
+        return "value must be a short integer scalar"
+    if not minimum <= number <= maximum:
+        return f"value must be between {minimum} and {maximum}"
+    return None
+
+
+def header_value_problem(name: str, value: Any) -> str | None:
+    if not isinstance(value, str):
+        return "value must be a string"
+    if not value:
+        return "value must not be empty"
+    if len(value) > config.MAX_HEADER_VALUE_LENGTH:
+        return "value exceeds the maximum length"
+    if any(ord(char) < 32 or ord(char) > 126 for char in value):
+        return "value must contain printable ASCII only"
+    if name == "User-Agent" and not value.startswith(config.USER_AGENT_PREFIX):
+        return f"value must start with '{config.USER_AGENT_PREFIX}'"
+    return None
+
+
+def source_query_keys(source: str) -> frozenset[str]:
+    """Return the query keys already embedded in a planned source path."""
+
+    try:
+        query = urlsplit(source).query
+    except ValueError:
+        return frozenset()
+    return frozenset(
+        key for key, _value in parse_qsl(query, keep_blank_values=True)
+    )
+
+
+def build_url(
+    base_url: str, source: str, query_params: Mapping[str, Any] | None = None
+) -> str:
+    """Resolve a source path and append validated query parameters.
+
+    Validation is repeated here so the fetch path cannot be driven with values
+    that never passed plan loading.  ``base_url`` is only used for relative
+    sources.  Existing source query keys are preserved; a declared key that
+    already exists is a hard conflict and raises ``ValueError`` instead of
+    being overwritten or duplicated.
+    """
+
+    if source.startswith(("http://", "https://")):
+        resolved = source
+    else:
+        resolved = f"{base_url}/{source.lstrip('/')}"
+    query_params = query_params or {}
+    if not isinstance(query_params, Mapping):
+        raise ValueError("query_params must be a mapping")
+    for key, value in query_params.items():
+        if not isinstance(key, str):
+            raise ValueError("query parameter names must be strings")
+        problem = query_value_problem(key, value)
+        if problem is not None:
+            raise ValueError(f"query parameter '{key}': {problem}")
+    if not query_params:
+        return resolved
+    parts = urlsplit(resolved)
+    existing = parse_qsl(parts.query, keep_blank_values=True)
+    existing_keys = {key for key, _value in existing}
+    conflicts = sorted(set(query_params) & existing_keys)
+    if conflicts:
+        raise ValueError(
+            "query key(s) already present in source: " + ", ".join(conflicts)
+        )
+    pairs = list(existing) + [
+        (key, _scalar_text(value)) for key, value in query_params.items()
+    ]
+    return urlunsplit(parts._replace(query=urlencode(pairs)))
+
+
+def merge_headers(headers: Mapping[str, Any] | None = None) -> dict[str, str]:
+    """Merge planned headers over the fixed project User-Agent."""
+
+    merged = {"User-Agent": f"{config.APP_NAME}/{config.APP_VERSION}"}
+    seen: set[str] = set()
+    for raw_name, value in (headers or {}).items():
+        canonical = canonical_header_name(raw_name)
+        if canonical is None:
+            raise ValueError(f"request header '{raw_name}' is not allowed")
+        folded = raw_name.casefold()
+        if folded in seen:
+            raise ValueError(f"request header '{canonical}' is declared more than once")
+        seen.add(folded)
+        problem = header_value_problem(canonical, value)
+        if problem is not None:
+            raise ValueError(f"request header '{canonical}': {problem}")
+        merged[canonical] = value
+    return merged
+
+
+def _scalar_text(value: Any) -> str:
+    return value if isinstance(value, str) else str(value)
+
+
+def _host_hint(base_url: str, source: str) -> str:
+    candidate = source if source.startswith(("http://", "https://")) else (
+        f"{base_url}/{source.lstrip('/')}"
+    )
+    try:
+        return (urlsplit(candidate).hostname or "").lower() or "<none>"
+    except ValueError:
+        return "<none>"
 
 
 @dataclass(frozen=True)
@@ -87,12 +230,28 @@ class Fetcher:
         self.session = session
 
     def resolve(self, source: str) -> str:
-        if source.startswith(("http://", "https://")):
-            return source
-        return f"{self.base_url}/{source.lstrip('/')}"
+        return build_url(self.base_url, source)
 
-    def fetch(self, source: str) -> FetchResponse:
-        url = self.resolve(source)
+    def fetch(
+        self,
+        source: str,
+        query_params: Mapping[str, Any] | None = None,
+        headers: Mapping[str, Any] | None = None,
+    ) -> FetchResponse:
+        query_params = query_params or {}
+        try:
+            if not isinstance(query_params, Mapping):
+                raise ValueError("query_params must be a mapping")
+            if headers is not None and not isinstance(headers, Mapping):
+                raise ValueError("headers must be a mapping")
+            url = build_url(self.base_url, source, query_params)
+            request_headers = merge_headers(headers)
+        except ValueError as exc:
+            # Never fall back to the bare source: a rejected extension is a
+            # runtime rejection, audited and classified as a network failure.
+            hint = _host_hint(self.base_url, source)
+            self._audit("fetch_rejected", f"host={hint} reason=invalid_request")
+            raise FetchError("network", f"request rejected: {exc}") from exc
         target = check_target(url)
         if not target.allowed:
             self._audit(
@@ -107,7 +266,7 @@ class Fetcher:
                 timeout=(self.timeout_seconds, self.timeout_seconds),
                 stream=True,
                 allow_redirects=False,
-                headers={"User-Agent": f"{config.APP_NAME}/{config.APP_VERSION}"},
+                headers=request_headers,
             )
         except requests.exceptions.Timeout as exc:
             raise FetchError("timeout", "request timed out") from exc

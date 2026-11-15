@@ -55,7 +55,11 @@ class JobExecutor:
             error_class: str | None = None
             detail = ""
             try:
-                response = self.fetcher.fetch(job.source)
+                response = self.fetcher.fetch(
+                    job.source,
+                    query_params=job.params.get("query"),
+                    headers=job.params.get("headers"),
+                )
                 self._check_preconditions(job, response.content, response.content_type)
                 digest = hashlib.sha256(response.content).hexdigest()
                 size_bytes = len(response.content)

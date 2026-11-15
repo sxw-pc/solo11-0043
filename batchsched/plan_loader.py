@@ -11,6 +11,7 @@ from .plan_schema import (
     ALLOWED_JOB,
     ALLOWED_TOP,
     check_duplicate_keys,
+    child_node,
     find_cycle,
     is_int,
     job_nodes,
@@ -121,7 +122,9 @@ def parse_plan_text(text: str, display_name: str = "<inline>") -> PlanDag:
                         fields.get(key, line),
                     )
                 )
-        job = parse_job(raw_job, line, fields, issues)
+        job = parse_job(
+            raw_job, line, fields, issues, params_node=child_node(node, "params")
+        )
         if job is None:
             continue
         if job.id in jobs:

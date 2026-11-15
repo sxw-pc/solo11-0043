@@ -36,6 +36,7 @@ pytest -q
 ```bash
 python -m batchsched plan-validate plans/demo.yaml
 python -m batchsched plan-validate plans/demo_invalid_cycle.yaml   # 返回非 0，并给出环所在行
+python -m batchsched plan-validate plans/demo_params.yaml           # 请求扩展示例
 ```
 
 查看台账与报告：
@@ -76,7 +77,26 @@ jobs:
     params:
       expect_content_type: application/json
       min_bytes: 10
+
+  - id: concurrency_probe
+    source: /api/concurrency
+    depends_on: [fetch_catalog]
+    retry:
+      mode: fixed
+      max_attempts: 2
+      base_delay_ms: 100
+    params:
+      query:
+        delay_ms: 25
+      headers:
+        accept: application/json
+        x-request-id: demo-params-001
 ```
+
+`plans/demo_params.yaml` 是可直接运行的请求扩展示例。执行期 `executor` 把计划期验证过的
+`query`/`headers` 交给 `fetcher` 组装 URL 与请求头；若运行期仍需拒绝（例如手工构造的
+`JobSpec` 越界，或拼接后的主机不在 allow-list），会写入 `fetch_rejected` 审计事件并以
+`network` 错误类记入 attempts，**不会**静默丢弃扩展去请求原始 source。
 
 字段规则：
 
@@ -84,6 +104,11 @@ jobs:
 - `source` 必须是以 `/` 开头的本地路径，不能是完整 URL、不能含 `://`、`..` 或空白。
 - `depends_on` 中的作业必须存在，且不能自依赖或重复。
 - 计划不能有环；校验错误带 YAML 行号。
+- `params` 可以声明作业控制项（`expect_content_type`、`min_bytes`、`note`），也可以声明**受控请求扩展**：
+  - `params.query`（或直接顶层白名单键）只接受白名单内的查询键，目前为 `delay_ms`，值必须是 0–500 的短整数标量（YAML 整数或十进制数字串）。
+  - `params.headers` 只接受固定小集合：`Accept`、`Accept-Language`、`Cache-Control`、`X-Request-ID`、`User-Agent`；`User-Agent` 必须以 `batchsched/` 开头，其余值须为可打印 ASCII 短文本。
+  - 其余键、越界值、非法容器类型在计划加载期报 `invalid_params` 并带行号，不进入调度。
+  - `source` 自身已携带的查询键与声明键冲突时直接拒绝，不覆盖、不重复拼接。
 - 未知的顶层字段、作业字段和 retry 字段都会被拒绝。
 - 作业数上限 200；并发上限 8；重试次数 1–5；退避基数 0–10000 ms；单作业累计退避不超过 10 s。
 - `retryable` 可以显式覆盖默认可重试错误集合。
@@ -160,9 +185,10 @@ python -m batchsched resume --run <run_id>
 pytest -q
 ```
 
-当前共有 **79 个测试项**，覆盖：
+当前共有 **110 个测试项**，覆盖：
 
 - 计划校验：重复 id、悬空依赖、自依赖、环、未知字段、非法 retry、作业上限、YAML 语法与行号。
+- 请求扩展：query/header 白名单、类型与范围、source 查询键冲突、参数行号、拼接与运行期拒绝审计。
 - DAG：拓扑分层、执行前沿、失败/skipped 传导、下游计算。
 - 调度：并发峰值、显式并发上限、失败跳过、已有 done 不重跑、中断、worker 异常隔离。
 - 抓取与执行：白名单拒绝且零 HTTP 调用、500/404/超时/空 body/超大响应分类、固定/指数退避、4xx 不重试、退避上限、输出 SHA-256。
@@ -205,6 +231,7 @@ batchsched/
   mocksite/            本地 mock 站点与 fixture
 plans/
   demo.yaml
+  demo_params.yaml
   demo_invalid_cycle.yaml
 tests/                 pytest 测试
 ```

@@ -7,7 +7,7 @@
 - 完整 Python 源码（`batchsched/`）
 - 演示与非法计划（`plans/`）
 - 本机 mock 站点与 fixture（`batchsched/mocksite/`）
-- 79 个 pytest 测试项（`tests/`）
+- 110 个 pytest 测试项（`tests/`）
 - `pyproject.toml`、直接依赖参考锁定（`requirements-lock.txt`）
 - README 与可视化验收依据
 - 运行期生成目录 `work/`（SQLite 台账与输出文件，已被 `.gitignore` 忽略）
@@ -56,6 +56,7 @@
 | 文件/目录 | 行数/说明 |
 | --- | ---: |
 | `plans/demo.yaml` | 59 |
+| `plans/demo_params.yaml` | 24 |
 | `plans/demo_invalid_cycle.yaml` | 19 |
 | `batchsched/mocksite/fixtures/*.json` | 33 |
 | `pyproject.toml` | 31 |
@@ -71,7 +72,7 @@
 $ pytest -q
 ........................................................................ [ 91%]
 .......                                                                  [100%]
-79 passed in 5.31s
+110 passed in 2.99s
 ```
 
 覆盖重点：
@@ -192,7 +193,7 @@ audit= [{'event': 'fetch_rejected', 'detail': 'host=example.invalid reason=host_
 - [x] 4. 中断后 `resume --run <run_id>` 可续跑；完成作业不重跑，输出 SHA-256 与基线一致；真实 KeyboardInterrupt 路径和 stop_event 自动化测试均通过。
 - [x] 5. `report --format json|md` 均可输出；报告路径检查无绝对路径。
 - [x] 6. 抓取层拒绝 `example.invalid`，HTTP 调用为 0，并写入 `fetch_rejected` 审计事件。
-- [x] 7. `pytest -q`：79 passed。
+- [x] 7. `pytest -q`：110 passed。
 - [x] 8. Python 代码 4345 行，在 2500–4500 内；单文件最大 299 行，≤300。
 - [x] 9. 无真实密钥、公司名、真实目标域名；仅使用 `demo.local`、`example.invalid` 保留域名和回环地址。
 - [x] 10. README 包含定位、差异、快速开始、YAML 样例、错误分类、续跑语义、台账结构、离线合规、测试说明、不实现清单。

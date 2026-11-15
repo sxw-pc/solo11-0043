@@ -29,6 +29,25 @@ MAX_ATTEMPTS = 5
 MIN_ATTEMPT_DELAY_MS = 0
 MAX_ATTEMPT_DELAY_MS = 10_000
 
+# Controlled request extensions that a plan may attach to a job source.
+# Query keys are limited to parameters the bundled mock site understands; the
+# tuple is an inclusive integer range enforced at plan-validation time.
+QUERY_PARAM_RULES = {"delay_ms": (0, 500)}
+QUERY_PARAM_KEYS = frozenset(QUERY_PARAM_RULES)
+MAX_QUERY_VALUE_LENGTH = 64
+
+# Headers are a fixed, case-insensitive allow-list.  They accompany the fixed
+# project User-Agent; a planned User-Agent must keep the project prefix.
+REQUEST_HEADER_NAMES = {
+    "accept": "Accept",
+    "accept-language": "Accept-Language",
+    "cache-control": "Cache-Control",
+    "user-agent": "User-Agent",
+    "x-request-id": "X-Request-ID",
+}
+USER_AGENT_PREFIX = f"{APP_NAME}/"
+MAX_HEADER_VALUE_LENGTH = 256
+
 ERROR_CLASSES = (
     "network",
     "http_5xx",

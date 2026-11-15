@@ -184,3 +184,93 @@ def test_attempt_number_continues_after_existing_attempt(
     assert outcome.status == config.JOB_DONE
     attempts = ledger.get_attempts(active_run)
     assert [item["attempt_no"] for item in attempts] == [1, 2]
+
+
+def test_executor_applies_query_and_header_extensions(
+    mock_base_url, ledger, active_run, output_dir
+):
+    import json
+
+    executor = _executor(mock_base_url, ledger, active_run, output_dir, [])
+    retry = RetryPolicy(mode="fixed", max_attempts=1, base_delay_ms=50)
+    outcome = executor.execute(
+        _job(
+            "/api/concurrency",
+            retry=retry,
+            params={
+                "query": {"delay_ms": 60},
+                "headers": {"Accept": "application/json"},
+            },
+        )
+    )
+    assert outcome.status == config.JOB_DONE
+    payload = json.loads((output_dir / "job_one.raw").read_text())
+    assert payload["delay_ms"] == 60
+
+
+def test_executor_preserves_source_query_and_appends_params(
+    mock_base_url, ledger, active_run, output_dir
+):
+    import json
+
+    executor = _executor(mock_base_url, ledger, active_run, output_dir, [])
+    retry = RetryPolicy(mode="fixed", max_attempts=1, base_delay_ms=50)
+    outcome = executor.execute(
+        _job(
+            "/api/concurrency?mode=fast",
+            retry=retry,
+            params={"query": {"delay_ms": "15"}},
+        )
+    )
+    assert outcome.status == config.JOB_DONE
+    payload = json.loads((output_dir / "job_one.raw").read_text())
+    assert payload["delay_ms"] == 15
+
+
+def test_executor_runtime_rejection_is_network_and_audited(
+    mock_base_url, ledger, active_run, output_dir
+):
+    audit_events: list[tuple[str, str]] = []
+
+    def audit(event: str, detail: str) -> None:
+        audit_events.append((event, detail))
+        ledger.add_audit(active_run, event, detail)
+
+    sleeps: list[float] = []
+    fetcher = Fetcher(base_url=mock_base_url, timeout_seconds=1.0, audit_hook=audit)
+    executor = JobExecutor(
+        fetcher, ledger, active_run, output_dir, sleep_fn=sleeps.append
+    )
+    retry = RetryPolicy(mode="fixed", max_attempts=3, base_delay_ms=50)
+    outcome = executor.execute(
+        _job(
+            "/api/concurrency",
+            retry=retry,
+            params={"query": {"delay_ms": 999}},
+        )
+    )
+    assert outcome.status == config.JOB_FAILED
+    assert outcome.error_class == "network"
+    attempts = ledger.get_attempts(active_run)
+    assert [item["error_class"] for item in attempts] == ["network"] * 3
+    assert len(sleeps) == 2
+    assert len([event for event in audit_events if event[0] == "fetch_rejected"]) == 3
+    rejected = [event for event in audit_events if event[0] == "fetch_rejected"]
+    assert rejected and "invalid_request" in rejected[0][1]
+
+
+def test_executor_rejected_extension_is_not_silently_dropped(
+    mock_base_url, ledger, active_run, output_dir
+):
+    executor = _executor(mock_base_url, ledger, active_run, output_dir, [])
+    retry = RetryPolicy(mode="fixed", max_attempts=1, base_delay_ms=50)
+    outcome = executor.execute(
+        _job(
+            "/api/concurrency",
+            retry=retry,
+            params={"headers": {"authorization": "Bearer nope"}},
+        )
+    )
+    assert outcome.status == config.JOB_FAILED
+    assert outcome.error_class == "network"
+    assert not (output_dir / "job_one.raw").exists()

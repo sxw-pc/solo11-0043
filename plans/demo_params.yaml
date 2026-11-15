@@ -1,0 +1,26 @@
+# Demonstrates controlled request extensions: the same mock endpoint accepts
+# a validated query parameter and a small allow-listed header set.
+name: demo-request-extensions
+concurrency: 2
+jobs:
+  - id: catalog_baseline
+    source: /api/catalog
+    retry:
+      mode: fixed
+      max_attempts: 2
+      base_delay_ms: 50
+
+  - id: concurrency_delayed
+    source: /api/concurrency
+    depends_on: [catalog_baseline]
+    retry:
+      mode: fixed
+      max_attempts: 2
+      base_delay_ms: 50
+    params:
+      query:
+        delay_ms: 25
+      headers:
+        accept: application/json
+        x-request-id: demo-params-001
+      min_bytes: 10
